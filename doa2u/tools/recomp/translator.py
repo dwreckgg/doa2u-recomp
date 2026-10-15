@@ -14,10 +14,144 @@ Produces compilable C code using recomp_types.h macros.
 import json
 import os
 import re
+import sys
+from pathlib import Path
 
 from .config import va_to_file_offset, is_code_address, TEXT_VA_START, TEXT_VA_END
 from .disasm import Disassembler
 from .lifter import Lifter, lift_basic_block
+
+
+class SplitEntryFlags:
+    """Prove register/immediate cmp/test state shared by all split-entry paths."""
+
+    FLAG_WRITERS = {
+        "add", "sub", "adc", "sbb", "and", "or", "xor", "cmp", "test", "inc", "dec",
+        "neg", "shl", "shr", "sar", "sal", "rol", "ror", "rcl", "rcr", "shld", "shrd",
+        "mul", "imul", "div", "idiv", "bt", "bts", "btr", "btc", "bsf", "bsr",
+        "xadd", "cmpxchg", "sahf", "popf", "popfd", "cmpsb", "cmpsw", "cmpsd",
+        "scasb", "scasw", "scasd", "comiss", "ucomiss", "comisd", "ucomisd",
+        "clc", "stc", "cmc",
+    }
+    UNCOND = {"jmp", "ret", "retn", "iret", "int3", "hlt", "ud2"}
+    REG32 = {"eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp"}
+    REG8 = {"al": "LO8(eax)", "ah": "HI8(eax)", "bl": "LO8(ebx)", "bh": "HI8(ebx)",
+            "cl": "LO8(ecx)", "ch": "HI8(ecx)", "dl": "LO8(edx)", "dh": "HI8(edx)"}
+    REG16 = {"ax": "LO16(eax)", "bx": "LO16(ebx)", "cx": "LO16(ecx)", "dx": "LO16(edx)",
+             "si": "LO16(esi)", "di": "LO16(edi)", "bp": "LO16(ebp)", "sp": "LO16(esp)"}
+    FULL = {r: r for r in REG32}
+    for _reg in REG8:
+        FULL[_reg] = "e" + _reg[0] + "x"
+    for _reg in REG16:
+        FULL[_reg] = ("e" + _reg) if _reg in ("si", "di", "bp", "sp") else ("e" + _reg[0] + "x")
+
+    def __init__(self, insns):
+        self.insns = sorted(insns)
+        self.idx = {a: i for i, (a, _, _, _) in enumerate(self.insns)}
+        self.targets = {}
+        for i, (_, _, mn, ops) in enumerate(self.insns):
+            if mn.startswith("j") and re.fullmatch(r"0x[0-9a-f]+", ops):
+                self.targets.setdefault(int(ops, 16), []).append(i)
+
+    @classmethod
+    def from_disassembly(cls):
+        asm_dir = Path(__file__).resolve().parents[1] / "disasm" / "output" / "asm"
+        paths = sorted(asm_dir.glob("*.asm"))
+        if not paths:
+            raise FileNotFoundError(f"No disassembly found in {asm_dir}")
+        pattern = re.compile(r"^\s+0x([0-9A-Fa-f]{8})\s+([0-9a-fA-F]+)\s+(\S+)\s*(.*?)\s*$")
+        insns = []
+        for path in paths:
+            with path.open(encoding="utf-8") as source:
+                for line in source:
+                    m = pattern.match(line)
+                    if m:
+                        insns.append((int(m[1], 16), len(m[2]) // 2, m[3].lower(),
+                                      m[4].split(";")[0].strip().lower()))
+        return cls(insns)
+
+    @classmethod
+    def _operand(cls, op):
+        if op in cls.REG32:
+            return op
+        if op in cls.REG8:
+            return cls.REG8[op]
+        if op in cls.REG16:
+            return cls.REG16[op]
+        if re.fullmatch(r"(?:0x[0-9a-fA-F]+|\d+)", op):
+            return "0x%Xu" % (int(op, 0) & 0xFFFFFFFF)
+        return None
+
+    @classmethod
+    def _written_regs(cls, mn, ops):
+        if mn in ("cmp", "test", "push") or mn.startswith("j"):
+            return set()
+        if mn == "call":
+            return set(cls.REG32)
+        parts = [p.strip() for p in ops.split(",")] if ops else []
+        out = {cls.FULL[parts[0]]} if parts and parts[0] in cls.FULL else set()
+        if mn in ("xchg", "xadd", "cmpxchg") and len(parts) > 1 and parts[1] in cls.FULL:
+            out.add(cls.FULL[parts[1]])
+        if mn in ("mul", "imul", "div", "idiv", "cdq", "cwd", "cbw", "cwde", "lodsb", "lodsd",
+                  "stosb", "stosd", "movsb", "movsd", "rep", "cpuid", "rdtsc"):
+            out |= {"eax", "edx", "ecx", "esi", "edi"}
+        return out
+
+    def _setter_before(self, i):
+        written = set()
+        for j in range(i - 1, max(-1, i - 64), -1):
+            a, _, mn, ops = self.insns[j]
+            if mn in self.FLAG_WRITERS:
+                if mn not in ("cmp", "test"):
+                    return None
+                parts = [p.strip() for p in ops.split(",")]
+                if len(parts) != 2:
+                    return None
+                ca, cb = map(self._operand, parts)
+                if ca is None or cb is None:
+                    return None
+                if any(self.FULL.get(p) in written for p in parts):
+                    return None
+                return mn, parts[0], parts[1], ca, cb
+            if mn == "call" or mn in self.UNCOND or (a in self.targets and j < i - 1):
+                return None
+            written |= self._written_regs(mn, ops)
+        return None
+
+    def condition(self, addr, jcc):
+        ia = self.idx.get(addr)
+        if ia is None:
+            return None
+        preds = list(self.targets.get(addr, []))
+        if ia:
+            pa, psz, pmn, _ = self.insns[ia - 1]
+            if pa + psz == addr and pmn not in self.UNCOND:
+                preds.append(ia)
+        setters = {self._setter_before(p) for p in preds}
+        if not preds or None in setters or len(setters) != 1:
+            return None
+        mn, oa, ob, ca, cb = next(iter(setters))
+        if mn == "test":
+            templates = {
+                "je": "TEST_Z(%s, %s)", "jz": "TEST_Z(%s, %s)",
+                "jne": "TEST_NZ(%s, %s)", "jnz": "TEST_NZ(%s, %s)",
+                "js": "TEST_S(%s, %s)", "jns": "!TEST_S(%s, %s)",
+                "jl": "TEST_S(%s, %s)", "jge": "!TEST_S(%s, %s)",
+                "jg": "(TEST_NZ(%s, %s) && !TEST_S(%s, %s))",
+                "jle": "(TEST_Z(%s, %s) || TEST_S(%s, %s))",
+                "ja": "TEST_NZ(%s, %s)", "jbe": "TEST_Z(%s, %s)",
+            }
+            template = templates.get(jcc)
+            cond = template % tuple([ca, cb] * (template.count("%s") // 2)) if template else None
+        else:
+            from .lifter import COND_MAP
+            info = COND_MAP.get(jcc)
+            macro = info[0] if info else None
+            cond = f"{macro}({ca}, {cb})" if macro else None
+        if cond is None:
+            return None
+        return (f"{cond} /* {jcc}: flags of `{mn} {oa}, {ob}` "
+                "before the split (entry-flags) */")
 
 
 def _fixup_icall_esp_save(lines):
@@ -110,6 +244,67 @@ class FunctionTranslator:
         self.abi_db = abi_db or {}
         self.disasm = Disassembler()
         self.lifter = Lifter(func_db=func_db, label_db=label_db, abi_db=abi_db, xbe_data=xbe_data)
+        self.entry_flags = None
+        manual_path = Path(__file__).resolve().parents[2] / "src" / "game" / "recomp" / "recomp_manual.c"
+        manual = manual_path.read_text(encoding="utf-8")
+        self.overridden = set(re.findall(r"^void (sub_[0-9A-F]{8})\(void\)", manual, re.M))
+        self.overridden.update(re.findall(r"(?:ABI_CHECK|CALL_LOG)\((sub_[0-9A-F]{8})\)", manual))
+
+    @staticmethod
+    def _emit_loop_edges(lines):
+        """Apply host polling/yield policy while emitting each function's control flow."""
+        current = None
+        label_index = None
+        first_statement = False
+        for i, line in enumerate(lines):
+            label = re.match(r"^loc_([0-9A-F]{8}): ;", line.strip())
+            if label:
+                current = int(label[1], 16)
+                label_index = i
+                first_statement = True
+                continue
+            if current is None:
+                continue
+            s = line.strip()
+            if first_statement and i - label_index <= 3:
+                if not s or (s.startswith("/*") and s.endswith("*/")):
+                    continue
+                first_statement = False
+                spin = re.match(rf"if \((.+)\) goto loc_{current:08X}; (/\*.*\*/)?", s)
+                if spin and ("MEM" not in spin[1] or 0x344180 <= current < 0x3C14C0):
+                    indent = line[:len(line) - len(line.lstrip())]
+                    lines[i] = (indent + "/* hw busy-wait forced through (was: if ("
+                                + spin[1][:70] + f") goto loc_{current:08X}) */")
+                    continue
+            if "goto loc_" in line and "_jt ==" not in line:
+                lines[i] = re.sub(
+                    r"goto loc_([0-9A-F]{8});",
+                    lambda m: ("{ RECOMP_SLICE_POINT(); goto loc_%s; }" % m[1]
+                               if int(m[1], 16) <= current else m[0]),
+                    line)
+        return lines
+
+    def _emit_fallthrough(self, lines, end):
+        target = self.func_db.get(end)
+        if target is None:
+            return
+        name = target.get("name", f"sub_{end:08X}")
+        if not re.fullmatch(r"sub_[0-9A-Fa-f]{8}", name):
+            return
+        last = ""
+        for line in reversed(lines[lines.index("{") + 1:]):
+            s = line.strip()
+            if (not s or s.startswith(("/*", "#", "loc_", "uint", "int "))
+                    or s.endswith(": ;") or s in ("{", "};")):
+                continue
+            last = s
+            break
+        terminated = (("return" in last and not last.startswith("if "))
+                      or last.startswith("goto ") or "__debugbreak" in last
+                      or last.endswith("break;"))
+        if not terminated:
+            sync = "g_seh_ebp = ebp; " if "    uint32_t ebp;" in lines else ""
+            lines.append(f"    {sync}{name}(); return; /* restored dropped fall-through to {name} */")
 
     def _read_func_bytes(self, start_va, end_va):
         """Read raw bytes for a function from the XBE."""
@@ -306,7 +501,8 @@ class FunctionTranslator:
         lines.append(f" */")
 
         # Function signature
-        lines.append(f"{ret_type} {name}({param_str})")
+        body_name = f"{name}_gen" if name in self.overridden else name
+        lines.append(f"{ret_type} {body_name}({param_str})")
         lines.append(f"{{")
 
         # ebp is the only callee-saved register declared as a local.
@@ -407,6 +603,15 @@ class FunctionTranslator:
 
         flag_state = None
         self.lifter.rcc_needed = 0
+        self.lifter.entry_condition = None
+        if instructions[0].is_cond_jump:
+            if self.entry_flags is None:
+                self.entry_flags = SplitEntryFlags.from_disassembly()
+            self.lifter.entry_condition = self.entry_flags.condition(start, instructions[0].mnemonic)
+            if (self.lifter.entry_condition is None
+                    and instructions[0].mnemonic not in ("jecxz", "jcxz", "loop", "loope", "loopne")):
+                print(f"[entry-flags] {name}: predecessor flags not provable, left _flags",
+                      file=sys.stderr)
         for bb in blocks:
             # Emit label if this block is a branch target.
             # Always append an empty statement (";") so a terminal label whose
@@ -456,9 +661,6 @@ class FunctionTranslator:
             lines.append(f"    #undef fp_top")
             lines.append(f"    #undef fp_st1")
 
-        lines.append(f"}}")
-        lines.append(f"")
-
         # Flag reads latched at their setter (lift_basic_block).
         if self.lifter.rcc_needed:
             sig_idx = lines.index("{")
@@ -480,6 +682,21 @@ class FunctionTranslator:
                     lines.insert(sig_idx + 2,
                                  "    ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */")
 
+        # Determine fall-through before loop rewrites: a forced-through poll
+        # still has the original conditional edge when classifying termination.
+        self._emit_fallthrough(lines, end)
+        if "    uint32_t ebp;" in lines:
+            # The safety net above may have introduced ebp after block lifting.
+            # Every conditional tail-call must publish that final local frame.
+            lines = [
+                re.sub(r"\) \{ (sub_[0-9A-Fa-f]{8}(?:_gen)?\(\); return; \})",
+                       r") { g_seh_ebp = ebp; \1", line)
+                if "g_seh_ebp" not in line else line
+                for line in lines
+            ]
+        lines = self._emit_loop_edges(lines)
+        lines.append("}")
+        lines.append("")
         return "\n".join(lines)
 
     def _find_used_registers(self, instructions):

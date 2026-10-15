@@ -11,11 +11,12 @@ from .config import is_code_address
 called, defined = set(), set()
 for path in glob.glob("src/game/recomp/gen/*.c") + ["src/game/recomp/recomp_manual.c"]:
     try:
-        text = open(path, encoding="utf-8", errors="ignore").read()
+        with open(path, encoding="utf-8", errors="ignore") as source:
+            text = source.read()
     except FileNotFoundError:
         continue
     called.update(int(m, 16) for m in re.findall(r"\bsub_([0-9A-F]{8})\(\)", text))
-    defined.update(int(m, 16) for m in re.findall(r"^void sub_([0-9A-F]{8})\(void\)", text, re.M))
+    defined.update(int(m, 16) for m in re.findall(r"^void sub_([0-9A-F]{8})(?:_gen)?\(void\)", text, re.M))
 
 missing = sorted(called - defined)
 seedable = [a for a in missing if is_code_address(a)]

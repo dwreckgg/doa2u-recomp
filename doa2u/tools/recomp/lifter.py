@@ -5,9 +5,9 @@ Translates individual x86 instructions (and common multi-instruction
 patterns like cmp+jcc) into C statements using the recomp_types.h macros.
 
 Register model:
-  - eax, ebx, ecx, edx, esi, edi, ebp: uint32_t locals
-  - esp: uint32_t local (stack pointer)
-  - FPU: double fp_stack[8] with fp_top index
+  - eax, ebx, ecx, edx, esi, edi, esp: shared uint32_t registers
+  - ebp: function-local frame pointer bridged through g_seh_ebp
+  - FPU and XMM: shared g_fp_stack/g_fp_top and g_xmm register files
 
 Memory model:
   - MEM8/MEM16/MEM32 macros for memory access at flat addresses
@@ -896,6 +896,7 @@ class Lifter:
         self.func_end = 0
         self.rcc_needed = 0       # _rccN latches the current function needs
         self.unlatched_reads = [] # clobbered flag reads whose setter is in an earlier block
+        self.entry_condition = None
 
     def _call_target_name(self, addr):
         """Get the name for a call target address."""
@@ -1373,6 +1374,12 @@ class Lifter:
         # The callee's 'ret' will pop it back off.
         if insn.call_target:
             name = self._call_target_name(insn.call_target)
+            if insn.call_target == 0x003354E0 and name == "sub_003354E0":
+                return [
+                    "{ int64_t _ft = (int64_t)g_fp_stack[g_fp_top & 7]; g_fp_top++; "
+                    "eax = (uint32_t)_ft; edx = (uint32_t)((uint64_t)_ft >> 32); } "
+                    "/* inline _ftol2 (bug #8) */"
+                ]
             # publish ebp: frame-inheriting callees (fpo_leaf, SEH epilog) read it from g_seh_ebp
             lines = [f"g_seh_ebp = ebp; PUSH32(esp, 0); {name}(); /* call 0x{insn.call_target:08X} */"]
             # After __SEH_prolog/__SEH_epilog, read back the frame pointer.
@@ -1514,10 +1521,13 @@ class Lifter:
         cond_info = COND_MAP.get(jcc)
         desc = cond_info[2] if cond_info else jcc
         if target:
+            cond = f"_flags /* {jcc}: {desc} */"
+            if insn.address == self.func_start and self.entry_condition:
+                cond = self.entry_condition
             if self._is_external_target(target):
                 name = self._call_target_name(target)
-                return [f"if (_flags /* {jcc}: {desc} */) {{ {name}(); return; }}"]
-            return [f"if (_flags /* {jcc}: {desc} */) goto loc_{target:08X};"]
+                return [f"if ({cond}) {{ {name}(); return; }}"]
+            return [f"if ({cond}) goto loc_{target:08X};"]
         return [f"/* {jcc}: {desc} - no target */"]
 
     # ── SETcc / CMOVcc ──
