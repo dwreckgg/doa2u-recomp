@@ -11,7 +11,7 @@ that compiles and runs on Windows as a native x86-64 executable.
 - Internal resolution scaling to 1440p (3x)
 **Planned:** Working online mode. Either client-hosted like my DOA3 recomp or a dedicated server, hooking into what's there with online mode.
 
-<img width="642" height="512" alt="Screenshot 2026-10-14 213316" src="https://github.com/user-attachments/assets/f5d55cd6-ea24-4461-9621-10fd37eb2ca5" />
+<img width="974" height="582" alt="Screenshot 2026-10-14 214555" src="https://github.com/user-attachments/assets/06569c91-d377-4dd4-b723-37fee6a7d98c" />
 
 ## Building
 
