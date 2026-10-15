@@ -25,11 +25,11 @@ set(NV2A_SOURCES
 set(GAME_SOURCES
     main.c
     movie_present.c
-    video_settings.c
-    log_settings.c
-    host_stubs.c             # inert stand-ins for the online hooks
+    ${CMAKE_SOURCE_DIR}/src/ui/video_settings.c
+    ${CMAKE_SOURCE_DIR}/src/ui/log_settings.c
     recomp/recomp_manual.c
     burnout_compat_stubs.c   # inert stubs for burnout-only symbols the nv2a srcs need
+    assets/doa2u.rc
     ${NV2A_SOURCES}
     ${RECOMP_GEN_SOURCES}
 )

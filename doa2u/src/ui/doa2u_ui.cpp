@@ -11,8 +11,8 @@
 
 extern "C" {
 #include "pad_mapping.h"
-#include "../game/video_settings.h"
-#include "../game/log_settings.h"
+#include "video_settings.h"
+#include "log_settings.h"
 ID3D11RenderTargetView *d3d8_GetPresentRTV(void);
 UINT                    d3d8_GetPresentWidth(void);
 UINT                    d3d8_GetPresentHeight(void);

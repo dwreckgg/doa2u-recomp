@@ -30,8 +30,8 @@
 #include "../audio/dsound_xbox.h"
 #include "recomp/gen/recomp_funcs.h"
 #include "recomp/recomp_dispatch.h"
-#include "video_settings.h"
-#include "log_settings.h"
+#include "../ui/video_settings.h"
+#include "../ui/log_settings.h"
 #include "ui/doa2u_ui.h"
 
 #define DOA2U_ENTRY_POINT  0x002BBB93
@@ -62,6 +62,10 @@ static HWND doa2u_create_window(void)
     wc.hInstance = GetModuleHandleA(NULL);
     wc.lpszClassName = "DOA2UWindow";
     wc.hCursor = LoadCursorA(NULL, IDC_ARROW);
+    wc.hIcon = LoadIconA(wc.hInstance, MAKEINTRESOURCEA(1));
+    wc.hIconSm = (HICON)LoadImageA(wc.hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
+                                   GetSystemMetrics(SM_CXSMICON),
+                                   GetSystemMetrics(SM_CYSMICON), 0);
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     RegisterClassExA(&wc);
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);

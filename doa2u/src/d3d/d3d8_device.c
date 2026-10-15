@@ -130,7 +130,7 @@ void d3d8_PresentFrame(void)
     /* Pump Windows messages */
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_QUIT) { extern void netplay_shutdown(void); netplay_shutdown(); ExitProcess(0); }
+        if (msg.message == WM_QUIT) ExitProcess(0);
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
@@ -588,7 +588,7 @@ static int g_off_active;
  * is saved and restored, since the pgraph translator does not re-send state
  * it believes is still bound.
  * ================================================================ */
-#include "../game/video_settings.h"
+#include "../ui/video_settings.h"
 #include <d3dcompiler.h>
 #pragma comment(lib, "d3dcompiler.lib")
 
@@ -863,11 +863,7 @@ static HRESULT __stdcall dev_Present(IDirect3DDevice8 *self, const RECT *src, co
      * the window responsive and handle input. */
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_QUIT) {
-            extern void netplay_shutdown(void);
-            netplay_shutdown();
-            ExitProcess(0);
-        }
+        if (msg.message == WM_QUIT) ExitProcess(0);
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
@@ -1878,11 +1874,7 @@ static HRESULT __stdcall dev_Swap(IDirect3DDevice8 *self, DWORD Flags)
     /* Pump Windows messages (same as dev_Present) */
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_QUIT) {
-            extern void netplay_shutdown(void);
-            netplay_shutdown();
-            ExitProcess(0);
-        }
+        if (msg.message == WM_QUIT) ExitProcess(0);
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
