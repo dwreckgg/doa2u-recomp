@@ -42,11 +42,11 @@ This project stands on the amazing work of **Ned Heller (sp00nz)**:
 - [burnout3](https://github.com/sp00nznet/burnout3) — the first static recompilation of a retail
   original Xbox game, and the reference this port follows. The NV2A→D3D11 push-buffer translator
   comes from it directly.
-- [doa3-recomp](https://github.com/parkerallan/doa3-recomp) — the Dead or Alive 3 static
-  recompilation project I made, this builds on: the D3D11 rendering/translation, video playback using pl_mpeg, overlay menu system, etc.
 
 Also relies on:
 
+- [doa3-recomp](https://github.com/parkerallan/doa3-recomp) — the Dead or Alive 3 static
+  recompilation project I made. This builds on: the D3D11 rendering/translation, video playback using pl_mpeg, overlay menu system, etc.
 - [Cxbx-Reloaded](https://github.com/Cxbx-Reloaded/Cxbx-Reloaded) — used as a debugging oracle;
   Breakpointing the emulator and diffing its behaviour against ours found most of the bugs.
 - [xemu](https://github.com/xemu-project/xemu) — NV2A documentation and the texture unswizzling
