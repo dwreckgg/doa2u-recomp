@@ -3,13 +3,15 @@
 Translation of the original Xbox binary of Dead or Alive 2 Ultimate into native C
 that compiles and runs on Windows as a native x86-64 executable.
 
-**Status:** Work in progress, matches are playable, but there are visual issues and some game mode specific issues.
+**Status:** Work in progress. Matches are playable, but there are visual issues and some game mode-specific issues.
 
 ## Features
-- (Planned) New online mode added for single and tag matches
 - Capped at 60 FPS
 - Windowed/Borderless and 4:3/16:9 options
 - Internal resolution scaling to 1440p (3x)
+**Planned:** Working online mode. Either client-hosted like my DOA3 recomp or a dedicated server, hooking into what's there with online mode.
+
+<img width="642" height="512" alt="Screenshot 2026-10-14 213316" src="https://github.com/user-attachments/assets/f5d55cd6-ea24-4461-9621-10fd37eb2ca5" />
 
 ## Building
 
