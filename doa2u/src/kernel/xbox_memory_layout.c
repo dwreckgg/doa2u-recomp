@@ -225,6 +225,28 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
     }
 
     /*
+     * Reserve the GPU memory window (Xbox VA 0xF0000000-0xFCFFFFFF) so host
+     * allocations (e.g. XAudio2) can't land there and get overwritten when
+     * the game writes GPU memory (the mode-select transition crash).
+     */
+    {
+        void *gpu = (void *)((uintptr_t)0xF0000000u + g_memory_offset);
+        SIZE_T gpu_size = (SIZE_T)(XBOX_NV2A_MMIO_BASE - 0xF0000000u);
+        LPVOID r = VirtualAlloc(gpu, gpu_size, MEM_RESERVE, PAGE_NOACCESS);
+        if (r == gpu) {
+            fprintf(stderr, "xbox_MemoryLayoutInit: GPU memory window reserved at %p "
+                            "(Xbox VA 0xF0000000, %u MB)\n",
+                    gpu, (unsigned)(gpu_size / (1024 * 1024)));
+        } else {
+            fprintf(stderr, "xbox_MemoryLayoutInit: WARNING could not reserve the GPU "
+                            "memory window at %p (got %p, error %lu) -- host "
+                            "allocations may be overwritten\n",
+                    gpu, r, GetLastError());
+            if (r) VirtualFree(r, 0, MEM_RELEASE);
+        }
+    }
+
+    /*
      * Reserve the MCPX APU MMIO aperture (Xbox VA 0xFE800000-0xFE87FFFF) for
      * the same reason. The recompiled DirectSound driver drives the audio
      * front end by storing methods into this window, and the VEH routes those
