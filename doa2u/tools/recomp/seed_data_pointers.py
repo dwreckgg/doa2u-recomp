@@ -40,6 +40,9 @@ def at_boundary(va, skip_table=True):
     # ret imm16: C2 xx xx
     if byte_at(va - 3) == 0xC2:
         return True
+    # table start behind MSVC's lea ecx,[ecx+0] pad after a ret (sub_0011CFC0's table)
+    if not skip_table and [byte_at(va - 3), byte_at(va - 2), byte_at(va - 1)] == [0x8D, 0x49, 0x00]:
+        return at_boundary(va - 3, False)
     # a switch jump table the compiler placed inline after the previous
     # function (e.g. sub_00065DC0, script opcode 0x39, behind the table of
     # sub_00065C40): skip back over its code-address dwords

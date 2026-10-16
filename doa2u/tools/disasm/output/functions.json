@@ -44768,6 +44768,19 @@
   "called_by": []
  },
  {
+  "start": "0x00091B70",
+  "end": "0x00091BA0",
+  "size": 48,
+  "name": "sub_00091B70",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
+  "called_by": []
+ },
+ {
   "start": "0x00091BA0",
   "end": "0x00091BF0",
   "size": 80,
@@ -103151,6 +103164,19 @@
   "called_by": [
    "0x0011D480"
   ]
+ },
+ {
+  "start": "0x0011CFC0",
+  "end": "0x0011D250",
+  "size": 656,
+  "name": "sub_0011CFC0",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
+  "called_by": []
  },
  {
   "start": "0x0011D250",
@@ -232772,6 +232798,19 @@
   "called_by": []
  },
  {
+  "start": "0x002A93D0",
+  "end": "0x002A9400",
+  "size": 48,
+  "name": "sub_002A93D0",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
+  "called_by": []
+ },
+ {
   "start": "0x002A9400",
   "end": "0x002A9417",
   "size": 23,
@@ -235344,6 +235383,19 @@
    "0x002B4980",
    "0x002BAB9D"
   ],
+  "called_by": []
+ },
+ {
+  "start": "0x002ADCA0",
+  "end": "0x002AE670",
+  "size": 2512,
+  "name": "sub_002ADCA0",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
   "called_by": []
  },
  {

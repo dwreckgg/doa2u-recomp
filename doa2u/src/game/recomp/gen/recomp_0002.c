@@ -1,6 +1,6 @@
 /**
  * Dead or Alive 2 Ultimate - Recompiled code chunk 2
- * Functions: 1000 (0x0006B5E0 - 0x00098AE0)
+ * Functions: 1000 (0x0006B5E0 - 0x00098AD6)
  */
 
 #define RECOMP_GENERATED_CODE
@@ -73499,6 +73499,28 @@ loc_00091B1B: ;
 }
 
 /**
+ * sub_00091B70
+ * Original: 0x00091B70 - 0x00091BA0 (48 bytes, 19 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_00091B70(void)
+{
+
+loc_00091B70: ;
+    eax = 0; /* xor self */
+    MEM32(0x67A484) = eax;
+    MEM32(0x67A4A0) = eax;
+    MEM32(0x67A4BC) = eax;
+    MEM32(0x67A4D8) = eax;
+    MEM32(0x67A4F4) = eax;
+    MEM32(0x67A510) = eax;
+    MEM32(0x67A52C) = eax;
+    esp += 4; return; /* ret */
+
+}
+
+/**
  * sub_00091BA0
  * Original: 0x00091BA0 - 0x00091BF0 (80 bytes, 34 insns)
  * CC: cdecl, 0 params, returns int_or_void
@@ -87397,61 +87419,4 @@ loc_00098AD6: ;
     eax = (uint32_t)(-(int32_t)eax);
     esp += 4; return; /* ret */
 
-}
-
-/**
- * sub_00098AE0
- * Original: 0x00098AE0 - 0x00098B26 (70 bytes, 22 insns)
- * CC: cdecl, 0 params, returns int_or_void
- * Frame: fpo_leaf
- */
-void sub_00098AE0(void)
-{
-    uint32_t ebp;
-    int _flags = 0; /* fallback flag var */
-    #define fp_push(v) (g_fp_stack[--g_fp_top & 7] = (v))
-    #define fp_pop() (g_fp_top++)
-    #define fp_popp() (fp_pop())
-    #define fp_top() g_fp_stack[g_fp_top & 7]
-    #define fp_st1() g_fp_stack[(g_fp_top + 1) & 7]
-    ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
-
-loc_00098AE0: ;
-    ecx = MEM32(esp + 4);
-    xmm0 = xmm_zero(); /* xorps self */
-    PUSH32(esp, esi);
-    esi = MEM32(ecx + 4);
-    /* test esi, esi - flags set for next jcc */
-    PUSH32(esp, edi);
-    if (TEST_Z(esi, esi)) { g_seh_ebp = ebp; sub_00098B26(); return; } /* je: equal / zero */
-
-loc_00098AF0: ;
-    eax = MEM32(ecx + 8);
-    fp_push((double)SMEM32(ecx + 8)); /* fild */
-    if (CMP_GE(eax & eax, 0)) goto loc_00098B00; /* jge: greater or equal (signed >=) */
-
-loc_00098AFA: ;
-    fp_top() = x87_prec(fp_top() + (double)MEMF(0x3C3B68)); /* fadd mem */
-
-loc_00098B00: ;
-    /* test esi, esi - flags set for next jcc */
-    MEM32(esp + 0xC) = esi;
-    fp_push((double)SMEM32(esp + 0xC)); /* fild */
-    if (CMP_GE(esi & esi, 0)) goto loc_00098B12; /* jge: greater or equal (signed >=) */
-
-loc_00098B0C: ;
-    fp_top() = x87_prec(fp_top() + (double)MEMF(0x3C3B68)); /* fadd mem */
-
-loc_00098B12: ;
-    g_fp_stack[(g_fp_top + 1) & 7] = x87_prec(g_fp_stack[(g_fp_top + 1) & 7] / fp_top()); fp_pop(); /* fdivp st(1) */
-    fp_top() = x87_prec(fp_top() * (double)MEMF(0x3C2CFC)); /* fmul mem */
-    MEMF(esp + 0xC) = (float)fp_top(); fp_popp(); /* fstp */
-    xmm1 = xmm_load_ss(esp + 0xC); /* movss */
-    g_seh_ebp = ebp; sub_00098B29(); return; /* tail jmp 0x00098B29 */
-
-    #undef fp_push
-    #undef fp_pop
-    #undef fp_popp
-    #undef fp_top
-    #undef fp_st1
 }

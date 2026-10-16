@@ -2602,9 +2602,10 @@ static void bridge_ExFreePool(void)
     if (STACK_ARG(0)) xbox_HeapFree(STACK_ARG(0));
 }
 
-/* ExQueryNonVolatileSetting: XC_VIDEO (8) from the video settings (bit 16 = widescreen);
- * any other index reads back as zeros. */
+/* ExQueryNonVolatileSetting: XC_LANGUAGE (7) from the Profile settings, XC_VIDEO (8) from
+ * the video settings (bit 16 = widescreen); any other index reads back as zeros. */
 extern unsigned video_xc_video_value(void);
+extern int profile_get_language(void);
 static void bridge_ExQueryNonVolatileSetting(void)
 {
     uint32_t index = STACK_ARG(0), type = STACK_ARG(1), value = STACK_ARG(2);
@@ -2613,6 +2614,7 @@ static void bridge_ExQueryNonVolatileSetting(void)
         if (n > 0x100) n = 0x100;
         memset(XBOX_TO_NATIVE(value), 0, n);
         if (index == 8 && len >= 4) BRIDGE_MEM32(value) = video_xc_video_value();
+        if (index == 7 && len >= 4) BRIDGE_MEM32(value) = (uint32_t)profile_get_language();
     }
     /* XC_FACTORY_ETHERNET_ADDR (0x101): fixed MAC. The save encryption key uses it
      * (sub_00021280); a random per-boot MAC made saves unreadable next session. */

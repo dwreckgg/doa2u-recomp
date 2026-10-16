@@ -13,6 +13,7 @@ extern "C" {
 #include "pad_mapping.h"
 #include "video_settings.h"
 #include "log_settings.h"
+#include "profile_settings.h"
 ID3D11RenderTargetView *d3d8_GetPresentRTV(void);
 UINT                    d3d8_GetPresentWidth(void);
 UINT                    d3d8_GetPresentHeight(void);
@@ -273,6 +274,29 @@ void DrawGeneralSection()
         doa2u_log_set_enabled(on ? 1 : 0);
 }
 
+/* ── Profile section ──────────────────────────────────────────────────────*/
+
+void DrawProfileSection()
+{
+    static const char *kLanguage[] = { "English", "Japanese" };
+
+    switch (ResetSaveRow()) {
+    case 1:
+        profile_set_language(PROFILE_LANG_ENGLISH);
+        SetStatus("Profile settings reset to defaults");
+        break;
+    case 2:
+        SetSaveStatus(profile_settings_save(), doa2u_settings_ini_path());
+        break;
+    }
+
+    ImGui::Separator();
+
+    int lang = profile_get_language() == PROFILE_LANG_JAPANESE ? 1 : 0;
+    if (ImGui::Combo("System language", &lang, kLanguage, IM_ARRAYSIZE(kLanguage)))
+        profile_set_language(lang ? PROFILE_LANG_JAPANESE : PROFILE_LANG_ENGLISH);
+}
+
 void DrawMenu()
 {
     const ImGuiViewport *vp = ImGui::GetMainViewport();
@@ -290,6 +314,10 @@ void DrawMenu()
             }
             if (ImGui::BeginTabItem("Video")) {
                 DrawVideoSection();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Profile")) {
+                DrawProfileSection();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("General")) {
