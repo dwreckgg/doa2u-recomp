@@ -957,6 +957,220 @@ void d3d8_combiners_shutdown(void)
     fprintf(stderr, "NV2A combiners: Shut down\n");
 }
 
+/* NV2A texture shader + register combiners built from the raw pushbuffer words
+ * for the pgraph translator (xemu psh.c semantics; stage modes none, 2D, bump-env). */
+
+#include "d3d8_nv2aff.h"
+
+#define N2PS_CACHE_N 32
+static struct { Nv2aPSKey key; ID3D11PixelShader *ps; } g_n2ps_cache[N2PS_CACHE_N];
+static int g_n2ps_n, g_n2ps_next;
+static ID3D11Buffer *g_n2ps_cb;
+static ID3D11PixelShader *g_n2ps_armed;
+static Nv2aPSConsts g_n2ps_consts;
+
+static const char *n2ps_reg(uint32_t r, int stage, int final, char *tmp)
+{
+    switch (r & 0xF) {
+    case 1:  sprintf(tmp, "c0[%d]", stage); return tmp;
+    case 2:  sprintf(tmp, "c1[%d]", stage); return tmp;
+    case 3:  return "fogr";
+    case 4:  return "v0";
+    case 5:  return "v1";
+    case 8:  return "t0";
+    case 9:  return "t1";
+    case 10: return "t2";
+    case 11: return "t3";
+    case 12: return "r0";
+    case 13: return "r1";
+    case 14: return final ? "sumr" : "zero";
+    case 15: return final ? "efr" : "zero";
+    default: return "zero";
+    }
+}
+
+/* One 8-bit combiner input: reg 3:0, alpha 4, mapping 7:5. `alpha_path`
+ * reads .a or .b (alpha bit clear), the colour path .rgb or .aaa. */
+static void n2ps_input(char *o, uint32_t in, int stage, int final, int alpha_path)
+{
+    char tmp[16], x[40];
+    const char *r = n2ps_reg(in, stage, final, tmp);
+    int a = (in >> 4) & 1;
+    sprintf(x, "%s.%s", r, alpha_path ? (a ? "a" : "b") : (a ? "aaa" : "rgb"));
+    switch ((in >> 5) & 7) {
+    case 0: sprintf(o, "max(%s, 0.0)", x); break;
+    case 1: sprintf(o, "(1.0 - saturate(%s))", x); break;
+    case 2: sprintf(o, "(2.0 * max(%s, 0.0) - 1.0)", x); break;
+    case 3: sprintf(o, "(-2.0 * max(%s, 0.0) + 1.0)", x); break;
+    case 4: sprintf(o, "(max(%s, 0.0) - 0.5)", x); break;
+    case 5: sprintf(o, "(-max(%s, 0.0) + 0.5)", x); break;
+    case 6: sprintf(o, "(%s)", x); break;
+    default: sprintf(o, "(-%s)", x); break;
+    }
+}
+
+static const char *n2ps_op(uint32_t op)
+{
+    switch (op & 7) {
+    case 1:  return "(%s - 0.5)";
+    case 2:  return "(%s * 2.0)";
+    case 3:  return "((%s - 0.5) * 2.0)";
+    case 4:  return "(%s * 4.0)";
+    case 6:  return "(%s * 0.5)";
+    default: return "(%s)";
+    }
+}
+
+static const char *n2ps_dst(uint32_t d)
+{
+    switch (d & 0xF) {
+    case 4: return "v0"; case 5: return "v1";
+    case 8: return "t0"; case 9: return "t1"; case 10: return "t2"; case 11: return "t3";
+    case 12: return "r0"; case 13: return "r1";
+    default: return NULL;
+    }
+}
+
+#define N2EMIT(...) do { int _n = snprintf(buf + off, (size_t)(cap - off), __VA_ARGS__); \
+    if (_n < 0 || off + _n >= cap) return -1; off += _n; } while (0)
+
+static int n2ps_generate(const Nv2aPSKey *k, char *buf, int cap)
+{
+    int off = 0, i, n = (int)(k->comb_control & 0xFF);
+    int msb = (k->comb_control >> 8) & 1;
+    char A[96], B[96], C[96], D[96], fmt[160];
+    if (n < 1) n = 1;
+    if (n > 8) n = 8;
+    for (i = 0; i < 4; i++) {
+        uint32_t m = (k->shader_prog >> (5 * i)) & 31;
+        if (m != 0 && m != 1 && m != 6) return -1;
+        if (m == 6 && i == 0) return -1;
+    }
+    N2EMIT("Texture2D tex0 : register(t0); Texture2D tex1 : register(t1);\n"
+           "Texture2D tex2 : register(t2); Texture2D tex3 : register(t3);\n"
+           "SamplerState s0 : register(s0); SamplerState s1 : register(s1);\n"
+           "SamplerState s2 : register(s2); SamplerState s3 : register(s3);\n"
+           "cbuffer N2 : register(b0) { float4 c0[8]; float4 c1[8]; float4 fogc; float4 bm[4]; float aref; float3 pad; };\n"
+           "struct PS_IN { float4 pos : SV_POSITION; float4 d0 : COLOR0; float4 d1 : COLOR1;\n"
+           "  float2 tc0 : TEXCOORD0; float2 tc1 : TEXCOORD1; float2 tc2 : TEXCOORD2; float2 tc3 : TEXCOORD3; float fog : TEXCOORD4; };\n"
+           "float4 main(PS_IN i) : SV_TARGET {\n"
+           "  float4 zero = 0, t0 = 0, t1 = 0, t2 = 0, t3 = 0, fogr = fogc, v0 = i.d0, v1 = i.d1;\n");
+    for (i = 0; i < 4; i++) {
+        uint32_t m = (k->shader_prog >> (5 * i)) & 31;
+        int src = (i == 2) ? (int)((k->other_input >> 16) & 1) : (i == 3) ? (int)((k->other_input >> 20) & 3) : 0;
+        if (m == 1) N2EMIT("  t%d = tex%d.Sample(s%d, i.tc%d);\n", i, i, i, i);
+        if (m == 6) N2EMIT("  { float2 d = t%d.rg; t%d = tex%d.Sample(s%d, i.tc%d + float2(bm[%d].x * d.x + bm[%d].z * d.y, bm[%d].y * d.x + bm[%d].w * d.y)); }\n",
+                           src, i, i, i, i, i, i, i, i);
+    }
+    N2EMIT("  float4 r0 = float4(0, 0, 0, t0.a), r1 = 0;\n");
+    for (i = 0; i < n; i++) {
+        uint32_t ci = k->c_icw[i], co = k->c_ocw[i], ai = k->a_icw[i], ao = k->a_ocw[i];
+        const char *ds;
+        N2EMIT("  {\n");
+        n2ps_input(A, ci >> 24, i, 0, 0); n2ps_input(B, ci >> 16, i, 0, 0);
+        n2ps_input(C, ci >> 8, i, 0, 0);  n2ps_input(D, ci, i, 0, 0);
+        N2EMIT("    float3 ca = %s, cb = %s, cc = %s, cd = %s;\n", A, B, C, D);
+        N2EMIT("    float3 cab = %s, ccd = %s;\n", (co & 0x2000) ? "dot(ca, cb).xxx" : "ca * cb",
+               (co & 0x1000) ? "dot(cc, cd).xxx" : "cc * cd");
+        N2EMIT("    float3 csum = %s;\n", (co & 0x4000) ? (msb ? "(r0.a >= 0.5) ? ccd : cab" : "((uint)(r0.a * 255.0) & 1u) ? ccd : cab") : "cab + ccd");
+        n2ps_input(A, ai >> 24, i, 0, 1); n2ps_input(B, ai >> 16, i, 0, 1);
+        n2ps_input(C, ai >> 8, i, 0, 1);  n2ps_input(D, ai, i, 0, 1);
+        N2EMIT("    float aab = %s * %s, acd = %s * %s;\n", A, B, C, D);
+        N2EMIT("    float asum = %s;\n", (ao & 0x4000) ? (msb ? "(r0.a >= 0.5) ? acd : aab" : "((uint)(r0.a * 255.0) & 1u) ? acd : aab") : "aab + acd");
+        sprintf(fmt, "    cab = clamp(%s, -1.0, 1.0); ccd = clamp(%s, -1.0, 1.0); csum = clamp(%s, -1.0, 1.0);\n",
+                n2ps_op(co >> 15), n2ps_op(co >> 15), n2ps_op(co >> 15));
+        N2EMIT(fmt, "cab", "ccd", "csum");
+        sprintf(fmt, "    aab = clamp(%s, -1.0, 1.0); acd = clamp(%s, -1.0, 1.0); asum = clamp(%s, -1.0, 1.0);\n",
+                n2ps_op(ao >> 15), n2ps_op(ao >> 15), n2ps_op(ao >> 15));
+        N2EMIT(fmt, "aab", "acd", "asum");
+        if ((ds = n2ps_dst(co >> 4)))  { N2EMIT("    %s.rgb = cab;\n", ds); if (co & 0x80000) N2EMIT("    %s.a = cab.b;\n", ds); }
+        if ((ds = n2ps_dst(co)))       { N2EMIT("    %s.rgb = ccd;\n", ds); if (co & 0x40000) N2EMIT("    %s.a = ccd.b;\n", ds); }
+        if ((ds = n2ps_dst(co >> 8)))  N2EMIT("    %s.rgb = csum;\n", ds);
+        if ((ds = n2ps_dst(ao >> 4)))  N2EMIT("    %s.a = aab;\n", ds);
+        if ((ds = n2ps_dst(ao)))       N2EMIT("    %s.a = acd;\n", ds);
+        if ((ds = n2ps_dst(ao >> 8)))  N2EMIT("    %s.a = asum;\n", ds);
+        N2EMIT("  }\n");
+    }
+    if (!k->final0 && !k->final1) {
+        N2EMIT("  float4 res = r0;\n");
+    } else {
+        uint32_t f1 = k->final1;
+        N2EMIT("  float4 sumr = float4(%s + %s, 0);\n", (f1 & 0x20) ? "(1.0 - r0.rgb)" : "r0.rgb", (f1 & 0x40) ? "(1.0 - v1.rgb)" : "v1.rgb");
+        if (f1 & 0x80) N2EMIT("  sumr = saturate(sumr);\n");
+        n2ps_input(A, f1 >> 24, n - 1, 1, 0); n2ps_input(B, f1 >> 16, n - 1, 1, 0);
+        N2EMIT("  float4 efr = float4(saturate(%s * %s), 0);\n", A, B);
+        n2ps_input(A, k->final0 >> 24, n - 1, 1, 0); n2ps_input(B, k->final0 >> 16, n - 1, 1, 0);
+        n2ps_input(C, k->final0 >> 8, n - 1, 1, 0);  n2ps_input(D, k->final0, n - 1, 1, 0);
+        N2EMIT("  float4 res;\n  { float3 fa = saturate(%s); res.rgb = %s + fa * %s + (1.0 - fa) * %s; }\n", A, D, B, C);
+        n2ps_input(A, f1 >> 8, n - 1, 1, 1);
+        N2EMIT("  res.a = %s;\n", A);
+    }
+    N2EMIT("  res = saturate(res);\n");
+    if (k->alpha_test && k->alpha_func >= 0x200 && k->alpha_func < 0x207) {
+        static const char *cmp[7] = { "false", "a < aref", "a == aref", "a <= aref", "a > aref", "a != aref", "a >= aref" };
+        N2EMIT("  { float a = round(res.a * 255.0); if (!(%s)) discard; }\n", cmp[k->alpha_func - 0x200]);
+    }
+    N2EMIT("  return res;\n}\n");
+    return off;
+}
+#undef N2EMIT
+
+int d3d8_Nv2aPS_Arm(const Nv2aPSKey *key, const Nv2aPSConsts *cb)
+{
+    ID3D11PixelShader *ps = NULL;
+    int i;
+    for (i = 0; i < g_n2ps_n; i++)
+        if (!memcmp(&g_n2ps_cache[i].key, key, sizeof *key)) { ps = g_n2ps_cache[i].ps; break; }
+    if (i == g_n2ps_n) {
+        char hlsl[24576];
+        ID3DBlob *code = NULL, *err = NULL;
+        int len = n2ps_generate(key, hlsl, sizeof hlsl);
+        if (len > 0 && SUCCEEDED(D3DCompile(hlsl, (SIZE_T)len, "nv2a_ps", NULL, NULL, "main", "ps_5_0",
+                                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err))) {
+            if (FAILED(ID3D11Device_CreatePixelShader(d3d8_GetD3D11Device(), ID3D10Blob_GetBufferPointer(code),
+                                                      ID3D10Blob_GetBufferSize(code), NULL, &ps))) ps = NULL;
+        } else if (len > 0) {
+            fprintf(stderr, "NV2A PS compile failed: %s\n%s\n", err ? (char *)ID3D10Blob_GetBufferPointer(err) : "?", hlsl);
+        }
+        if (code) ID3D10Blob_Release(code);
+        if (err) ID3D10Blob_Release(err);
+        /* failures are cached too (ps NULL), so a bad state is compiled once */
+        i = (g_n2ps_n < N2PS_CACHE_N) ? g_n2ps_n++ : (g_n2ps_next++ % N2PS_CACHE_N);
+        if (g_n2ps_cache[i].ps) ID3D11PixelShader_Release(g_n2ps_cache[i].ps);
+        g_n2ps_cache[i].key = *key;
+        g_n2ps_cache[i].ps = ps;
+    }
+    if (!ps) return 0;
+    if (!g_n2ps_cb) {
+        D3D11_BUFFER_DESC bd;
+        memset(&bd, 0, sizeof bd);
+        bd.ByteWidth = sizeof(Nv2aPSConsts);
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(ID3D11Device_CreateBuffer(d3d8_GetD3D11Device(), &bd, NULL, &g_n2ps_cb))) { g_n2ps_cb = NULL; return 0; }
+    }
+    g_n2ps_consts = *cb;
+    g_n2ps_armed = ps;
+    return 1;
+}
+
+void d3d8_Nv2aPS_Disarm(void) { g_n2ps_armed = NULL; }
+
+/* Called from d3d8_combiners_prepare_draw: bind the armed shader, if any. */
+static BOOL n2ps_bind(void)
+{
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (!g_n2ps_armed || !ctx) return FALSE;
+    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_n2ps_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return FALSE;
+    memcpy(m.pData, &g_n2ps_consts, sizeof g_n2ps_consts);
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_n2ps_cb, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, g_n2ps_armed, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_n2ps_cb);
+    return TRUE;
+}
+
 /* ================================================================
  * Draw Integration
  * ================================================================ */
@@ -987,6 +1201,9 @@ BOOL d3d8_combiners_prepare_draw(void)
     const DWORD *rs;
     HRESULT hr;
     int i;
+
+    if (n2ps_bind())
+        return TRUE;
 
     /* Not using combiner shaders - fall back to fixed-function */
     if (g_ps_token == 0)

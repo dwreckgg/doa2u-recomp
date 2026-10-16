@@ -108,6 +108,7 @@ typedef enum D3DFORMAT {
     D3DFMT_A4R4G4B4      = 4,
     D3DFMT_A8            = 19,
     D3DFMT_R8B8          = 16,
+    D3DFMT_V8U8          = 0x28,   /* SZ_G8B8 bump map: du low byte, dv high byte */
 
     /* Compressed formats */
     D3DFMT_DXT1          = 12,

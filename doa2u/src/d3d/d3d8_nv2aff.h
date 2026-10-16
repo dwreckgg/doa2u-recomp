@@ -51,4 +51,25 @@ long d3d8_Nv2aFF_Init(void);
 void d3d8_Nv2aFF_Shutdown(void);
 int  d3d8_Nv2aFF_Bind(const Nv2aFFConstants *cb);
 
+/* NV2A texture shader + register combiners as one pixel shader, keyed on the
+ * raw pushbuffer registers (stage program, combiner words, alpha test). */
+typedef struct {
+    uint32_t shader_prog, other_input, comb_control;
+    uint32_t c_icw[8], c_ocw[8], a_icw[8], a_ocw[8];
+    uint32_t final0, final1;
+    uint32_t alpha_test, alpha_func;
+} Nv2aPSKey;
+
+typedef struct {
+    float    c0[8][4], c1[8][4];   /* per-stage factors, rgba 0..1 */
+    float    fog[4];               /* fog colour rgb, factor in a */
+    float    bump[4][4];           /* per stage: m00 m01 m10 m11 */
+    float    alpha_ref;
+    float    pad[3];
+} Nv2aPSConsts;
+
+/* d3d8_combiners.c: arm the shader for the next draw; 0 if it cannot be built. */
+int  d3d8_Nv2aPS_Arm(const Nv2aPSKey *key, const Nv2aPSConsts *cb);
+void d3d8_Nv2aPS_Disarm(void);
+
 #endif

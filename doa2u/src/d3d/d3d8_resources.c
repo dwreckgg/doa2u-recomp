@@ -37,6 +37,7 @@ DXGI_FORMAT d3d8_to_dxgi_format(D3DFORMAT fmt)
     case D3DFMT_A4R4G4B4:       return DXGI_FORMAT_B4G4R4A4_UNORM;
     case D3DFMT_LIN_A4R4G4B4:   return DXGI_FORMAT_B4G4R4A4_UNORM;
     case D3DFMT_A8L8:           return DXGI_FORMAT_R8G8_UNORM;
+    case D3DFMT_V8U8:           return DXGI_FORMAT_R8G8_SNORM;
     case D3DFMT_P8:             return DXGI_FORMAT_R8_UNORM;  /* palette handled separately */
     case D3DFMT_INDEX16:        return DXGI_FORMAT_R16_UINT;
     case D3DFMT_INDEX32:        return DXGI_FORMAT_R32_UINT;
@@ -62,6 +63,7 @@ UINT d3d8_format_bpp(D3DFORMAT fmt)
     case D3DFMT_LIN_A4R4G4B4:
     case D3DFMT_D16:
     case D3DFMT_INDEX16:
+    case D3DFMT_V8U8:
         return 16;
     case D3DFMT_A8:
     case D3DFMT_L8:

@@ -176,6 +176,10 @@ typedef struct {
     float u, v;
 } OutputVertex;
 
+/* Last value written to every method: the texture-shader path reads the
+ * combiner words, stage program and bump-env matrices from here. */
+static uint32_t g_pg_reg[0x800];
+
 static struct {
     /* Draw state */
     int in_draw;           /* Between BEGIN and END */
@@ -473,6 +477,7 @@ static int nv_texture_format(uint32_t nvfmt, D3DFORMAT *out_fmt,
     case 0x0C: f = D3DFMT_DXT1;         bpp = 0; comp = 1; break;
     case 0x0E: f = D3DFMT_DXT3;         bpp = 0; comp = 1; break;
     case 0x0F: f = D3DFMT_DXT5;         bpp = 0; comp = 1; break;
+    case 0x28: f = D3DFMT_V8U8;         bpp = 2; break;  /* SZ_G8B8 bump map */
     case 0x19: f = D3DFMT_A8;           bpp = 1; break;  /* SZ_A8       */
     case 0x1A: f = D3DFMT_A8L8;         bpp = 2; break;  /* SZ_A8Y8     */
     case 0x10: f = D3DFMT_LIN_A1R5G5B5; bpp = 2; break;
@@ -1377,6 +1382,12 @@ static uint32_t nv_light_vertex(const float pos[4], const float nrm[3],
     }
 }
 
+/* Texture-shader draws need all four texcoords and the specular colour;
+ * nv_build_array_vertex leaves them here while s_tc_want is set. */
+static int      s_tc_want;
+static float    s_tc_out[4][2];
+static uint32_t s_spec_out;
+
 static void nv_build_array_vertex(uint32_t index, OutputVertex *v,
                                   const NvBatchCtx *ctx)
 {
@@ -1451,6 +1462,14 @@ static void nv_build_array_vertex(uint32_t index, OutputVertex *v,
             v->color = nv_pack_color(out[NV2A_VP_OUT_D0]);
             v->u = out[NV2A_VP_OUT_T0][0];
             v->v = out[NV2A_VP_OUT_T0][1];
+            if (s_tc_want) {
+                int t;
+                for (t = 0; t < 4; t++) {
+                    s_tc_out[t][0] = out[NV2A_VP_OUT_T0 + t][0];
+                    s_tc_out[t][1] = out[NV2A_VP_OUT_T0 + t][1];
+                }
+                s_spec_out = nv_pack_color(out[NV2A_VP_OUT_D1]);
+            }
             return;
         }
     }
@@ -1490,6 +1509,18 @@ static void nv_build_array_vertex(uint32_t index, OutputVertex *v,
     if (nv_fetch_attr(9, index, tex, NULL)) {
         v->u = tex[0];
         v->v = tex[1];
+    }
+    if (s_tc_want) {
+        int t;
+        for (t = 0; t < 4; t++) {
+            tex[0] = tex[1] = 0.0f;
+            nv_fetch_attr(9 + t, index, tex, NULL);
+            s_tc_out[t][0] = tex[0];
+            s_tc_out[t][1] = tex[1];
+        }
+        {   uint32_t sc = 0, ty = g_pg.attr_fmt[4] & 0xF;
+            col[0] = col[1] = col[2] = 0.0f; col[3] = 1.0f;
+            s_spec_out = !nv_fetch_attr(4, index, col, &sc) ? 0 : (ty == 0 || ty == 4) ? sc : nv_pack_color(col); }
     }
 }
 
@@ -2780,6 +2811,231 @@ static int nv_gpu_ff_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int pr
     return 1;
 }
 
+/* BUMPENVMAP draws (the Aerial Gardens water): all four texcoords, both colours,
+ * and a pixel shader built from the raw combiner words (d3d8_Nv2aPS_Arm). */
+extern int d3d8_HasOffscreenTexture(uint32_t key);
+extern int d3d8_BindOffscreenTexture(uint32_t key, UINT stage);
+typedef struct {
+    float    x, y, z, rhw;
+    uint32_t d0, d1;
+    float    tc[4][2];
+} NvTsVertex;
+#define NV_TS_NF 20   /* clip-space floats per vertex: XYZW, 2 colours, 4 texcoords */
+
+static int nv_uses_texshader(void)
+{
+    uint32_t sp = g_pg_reg[0x1E70 >> 2];
+    int i;
+    for (i = 1; i < 4; i++) if (((sp >> (5 * i)) & 31) == 6) return 1;
+    return 0;
+}
+
+static void nv_ts_to_clip(const NvTsVertex *v, float *f)
+{
+    float W = (v->rhw != 0.0f) ? 1.0f / v->rhw : 1.0f;
+    int k;
+    f[0] = v->x * W; f[1] = v->y * W; f[2] = v->z * W; f[3] = W;
+    for (k = 0; k < 4; k++) {
+        f[4 + k] = (float)((v->d0 >> (8 * k)) & 255);
+        f[8 + k] = (float)((v->d1 >> (8 * k)) & 255);
+        f[12 + 2 * k] = v->tc[k][0]; f[13 + 2 * k] = v->tc[k][1];
+    }
+}
+
+static void nv_ts_from_clip(const float *f, NvTsVertex *v)
+{
+    float inv = (f[3] != 0.0f) ? 1.0f / f[3] : 1.0f;
+    int k;
+    v->x = f[0] * inv; v->y = f[1] * inv; v->z = f[2] * inv; v->rhw = inv;
+    v->d0 = v->d1 = 0;
+    for (k = 0; k < 4; k++) {
+        int a = (int)(f[4 + k] + 0.5f), b = (int)(f[8 + k] + 0.5f);
+        a = a < 0 ? 0 : a > 255 ? 255 : a; b = b < 0 ? 0 : b > 255 ? 255 : b;
+        v->d0 |= (uint32_t)a << (8 * k); v->d1 |= (uint32_t)b << (8 * k);
+        v->tc[k][0] = f[12 + 2 * k]; v->tc[k][1] = f[13 + 2 * k];
+    }
+}
+
+/* Same planes as nv_clip_triangle: W > 0.01, then Z >= 0. */
+static int nv_ts_clip_plane(float in[][NV_TS_NF], int n_in, int sel, float eps, float out[][NV_TS_NF])
+{
+    int n = 0, i, k;
+    for (i = 0; i < n_in; i++) {
+        const float *a = in[i], *b = in[(i + 1) % n_in];
+        float da = a[sel ? 2 : 3] - eps, db = b[sel ? 2 : 3] - eps;
+        if (da >= 0.0f) memcpy(out[n++], a, sizeof(float) * NV_TS_NF);
+        if ((da >= 0.0f) != (db >= 0.0f)) {
+            float t = da / (da - db);
+            for (k = 0; k < NV_TS_NF; k++) out[n][k] = a[k] + (b[k] - a[k]) * t;
+            n++;
+        }
+    }
+    return n;
+}
+
+static int nv_ts_clip_triangle(const NvTsVertex *v0, const NvTsVertex *v1, const NvTsVertex *v2, NvTsVertex *dst)
+{
+    float a[8][NV_TS_NF], b[8][NV_TS_NF];
+    int n, i;
+    nv_ts_to_clip(v0, a[0]); nv_ts_to_clip(v1, a[1]); nv_ts_to_clip(v2, a[2]);
+    n = nv_ts_clip_plane(a, 3, 0, 1e-2f, b);
+    if (n < 3) return 0;
+    n = nv_ts_clip_plane(b, n, 1, 0.0f, a);
+    if (n < 3) return 0;
+    for (i = 2; i < n; i++) {
+        nv_ts_from_clip(a[0], &dst[(i - 2) * 3 + 0]);
+        nv_ts_from_clip(a[i - 1], &dst[(i - 2) * 3 + 1]);
+        nv_ts_from_clip(a[i], &dst[(i - 2) * 3 + 2]);
+    }
+    return n - 2;
+}
+
+static void nv_ts_unpack_color(uint32_t c, float *o)
+{
+    o[0] = (float)((c >> 16) & 255) / 255.0f; o[1] = (float)((c >> 8) & 255) / 255.0f;
+    o[2] = (float)(c & 255) / 255.0f;         o[3] = (float)(c >> 24) / 255.0f;
+}
+
+/* 1 = drawn (or dropped), 0 = not a texture-shader draw / shader unavailable. */
+static int nv_submit_texshader(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int prim, int is_quads)
+{
+    static NvTsVertex *s_v, *s_c;
+    static uint32_t s_vcap, s_ccap;
+    uint32_t n = g_pg.idx_count, out_n, i, ntri, cn = 0;
+    Nv2aPSKey key;
+    Nv2aPSConsts cb;
+    NvDrawSummary sum;
+    NvPostOps post;
+    uint32_t cc = g_pg_reg[0x1E60 >> 2];
+    int st;
+
+    if (!nv_uses_texshader()) return 0;
+    if (prim != D3DPT_TRIANGLELIST && prim != D3DPT_TRIANGLESTRIP && prim != D3DPT_TRIANGLEFAN) return 0;
+
+    memset(&key, 0, sizeof key);
+    key.shader_prog  = g_pg_reg[0x1E70 >> 2];
+    key.other_input  = g_pg_reg[0x1E78 >> 2];
+    key.comb_control = cc;
+    for (i = 0; i < 8; i++) {
+        key.c_icw[i] = g_pg_reg[(0x0AC0 >> 2) + i]; key.c_ocw[i] = g_pg_reg[(0x1E40 >> 2) + i];
+        key.a_icw[i] = g_pg_reg[(0x0260 >> 2) + i]; key.a_ocw[i] = g_pg_reg[(0x0AA0 >> 2) + i];
+    }
+    key.final0 = g_pg_reg[0x0288 >> 2];
+    key.final1 = g_pg_reg[0x028C >> 2];
+    key.alpha_test = g_pg.alpha_test ? 1u : 0u;
+    key.alpha_func = key.alpha_test ? g_pg.alpha_func : 0u;
+
+    memset(&cb, 0, sizeof cb);
+    for (i = 0; i < 8; i++) {
+        nv_ts_unpack_color(g_pg_reg[(0x0A60 >> 2) + ((cc & 0x1000) ? i : 0)], cb.c0[i]);
+        nv_ts_unpack_color(g_pg_reg[(0x0A80 >> 2) + ((cc & 0x10000) ? i : 0)], cb.c1[i]);
+    }
+    {   uint32_t fc = g_pg_reg[0x02A8 >> 2];   /* SET_FOG_COLOR is R in the low byte */
+        cb.fog[0] = (float)(fc & 255) / 255.0f; cb.fog[1] = (float)((fc >> 8) & 255) / 255.0f;
+        cb.fog[2] = (float)((fc >> 16) & 255) / 255.0f; cb.fog[3] = 1.0f; }
+    for (st = 1; st < 4; st++) {
+        int k;
+        for (k = 0; k < 4; k++) cb.bump[st][k] = u2f(g_pg_reg[((0x1B28 + 0x40 * st) >> 2) + k]);
+    }
+    cb.alpha_ref = (float)(g_pg.alpha_ref & 0xFF);
+    if (!d3d8_Nv2aPS_Arm(&key, &cb)) return 0;
+
+    /* Vertices, quads expanded to lists. */
+    out_n = is_quads ? (n / 4) * 6 : n;
+    if (s_vcap < out_n) { void *p = realloc(s_v, out_n * sizeof *s_v); if (!p) { d3d8_Nv2aPS_Disarm(); return 1; } s_v = p; s_vcap = out_n; }
+    s_tc_want = 1;
+    { extern int g_vpn; g_vpn = 0; }
+    for (i = 0; i < n; i++) {
+        OutputVertex ov;
+        NvTsVertex tv;
+        uint32_t slot = i;
+        nv_build_array_vertex(g_pg.idx[i], &ov, ctx);
+        tv.x = ov.x; tv.y = ov.y; tv.z = ov.z; tv.rhw = ov.rhw;
+        tv.d0 = ov.color; tv.d1 = s_spec_out;
+        memcpy(tv.tc, s_tc_out, sizeof tv.tc);
+        if (!(tv.x == tv.x) || !(tv.y == tv.y) || !(tv.rhw == tv.rhw)) { s_tc_want = 0; d3d8_Nv2aPS_Disarm(); return 1; }
+        if (is_quads) {
+            uint32_t q = (i / 4) * 6, c = i & 3;
+            if (i / 4 >= n / 4) continue;
+            if (c == 0) { s_v[q + 0] = tv; s_v[q + 3] = tv; }
+            else if (c == 1) s_v[q + 1] = tv;
+            else if (c == 2) { s_v[q + 2] = tv; s_v[q + 4] = tv; }
+            else s_v[q + 5] = tv;
+            continue;
+        }
+        s_v[slot] = tv;
+    }
+    s_tc_want = 0;
+    if (is_quads) prim = D3DPT_TRIANGLELIST;
+
+    {   /* nv_fit_to_backbuffer for this vertex type */
+        unsigned gw, gh, bw = d3d8_GetBackbufferWidth(), bh = d3d8_GetBackbufferHeight();
+        nv_surface_size(&gw, &gh);
+        if (gw && gh && bw && bh && !(gw == bw && gh == bh)) {
+            float sx = (float)bw / (float)gw, sy = (float)bh / (float)gh;
+            for (i = 0; i < out_n; i++) { s_v[i].x *= sx; s_v[i].y *= sy; }
+        }
+    }
+
+    /* Near-plane clip into a triangle list (up to 3 triangles per source triangle). */
+    ntri = (prim == D3DPT_TRIANGLELIST) ? out_n / 3 : (out_n >= 3 ? out_n - 2 : 0);
+    if (s_ccap < ntri * 9) { void *p = realloc(s_c, ntri * 9 * sizeof *s_c); if (!p) { d3d8_Nv2aPS_Disarm(); return 1; } s_c = p; s_ccap = ntri * 9; }
+    for (i = 0; i < ntri; i++) {
+        uint32_t i0, i1, i2;
+        if (prim == D3DPT_TRIANGLELIST)     { i0 = i * 3; i1 = i0 + 1; i2 = i0 + 2; }
+        else if (prim == D3DPT_TRIANGLEFAN) { i0 = 0; i1 = i + 1; i2 = i + 2; }
+        else if (i & 1)                     { i0 = i + 1; i1 = i; i2 = i + 2; }
+        else                                { i0 = i; i1 = i + 1; i2 = i + 2; }
+        if (s_v[i0].rhw > 0.0f && s_v[i1].rhw > 0.0f && s_v[i2].rhw > 0.0f &&
+            s_v[i0].z >= 0.0f && s_v[i1].z >= 0.0f && s_v[i2].z >= 0.0f) {
+            s_c[cn++] = s_v[i0]; s_c[cn++] = s_v[i1]; s_c[cn++] = s_v[i2];
+        } else {
+            cn += 3 * (uint32_t)nv_ts_clip_triangle(&s_v[i0], &s_v[i1], &s_v[i2], &s_c[cn]);
+        }
+    }
+    if (cn < 3) { d3d8_Nv2aPS_Disarm(); return 1; }
+
+    /* Render state from the shared code, then this draw's own textures. */
+    sum.all_zero = 0; sum.max_u = sum.max_v = 0.0f;
+    memset(&post, 0, sizeof post);
+    g_nv_draw_has_uv = 1;
+    g_nv_draw_inline = 0;
+    nv_apply_draw_state(dev, &sum, &post);
+    for (st = 0; st < 4; st++) {
+        uint32_t mode = (key.shader_prog >> (5 * st)) & 31;
+        dev->lpVtbl->SetTexture(dev, st, NULL);
+        if (!mode || !g_pg.tex[st].enabled) continue;
+        if (d3d8_HasOffscreenTexture(g_pg.tex[st].offset)) {
+            g_pg.dyn_levels = 1;
+            d3d8_BindOffscreenTexture(g_pg.tex[st].offset, st);
+        } else {
+            IDirect3DTexture8 *t;
+            unsigned char sv[sizeof g_pg.tex[0]];
+            memcpy(sv, &g_pg.tex[0], sizeof sv);
+            memcpy(&g_pg.tex[0], &g_pg.tex[st], sizeof sv);
+            t = get_dynamic_texture(dev);
+            memcpy(&g_pg.tex[0], sv, sizeof sv);
+            if (t) dev->lpVtbl->SetTexture(dev, st, (IDirect3DBaseTexture8 *)t);
+        }
+        nv_apply_tex_address(dev, st);
+    }
+
+    {   DWORD prev_vs = 0;
+        int clipped = nv_apply_window_clip();
+        HRESULT got = dev->lpVtbl->GetVertexShader(dev, &prev_vs);
+        dev->lpVtbl->SetVertexShader(dev, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX4);
+        dev->lpVtbl->BeginScene(dev);
+        dev->lpVtbl->DrawPrimitiveUP(dev, D3DPT_TRIANGLELIST, cn / 3, s_c, sizeof(NvTsVertex));
+        if (clipped) { extern void d3d8_ResetScissorRect(void); d3d8_ResetScissorRect(); }
+        if (got == 0) dev->lpVtbl->SetVertexShader(dev, prev_vs);
+    }
+    d3d8_Nv2aPS_Disarm();
+    for (st = 1; st < 4; st++) dev->lpVtbl->SetTexture(dev, st, NULL);
+    g_pg.stats.draw_calls++;
+    g_pg.stats.vertices_submitted += cn;
+    return 1;
+}
+
 static void submit_array_draw(void)
 {
     nv_sync_render_target();
@@ -2811,6 +3067,11 @@ static void submit_array_draw(void)
 
     nv_batch_ctx_init(&ctx);
 
+    if (!is_points && nv_submit_texshader(dev, &ctx, prim, is_quads)) {
+        g_pg.idx_count = 0;
+        g_pg.idx_dropped = 0;
+        return;
+    }
     if (!is_points && nv_gpu_ff_submit(dev, &ctx, prim, is_quads)) {
         g_pg.idx_count = 0;
         g_pg.idx_dropped = 0;
@@ -3577,6 +3838,7 @@ int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param)
         return 0;
     }
     me = &s_mtab[method >> 2];
+    g_pg_reg[method >> 2] = param;
     f = me->mask;
 
     if (f & MF_PRE) {
