@@ -35,6 +35,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <math.h>    /* x87_frndint: floor/ceil/trunc/rint */
+#include <xmmintrin.h> /* rcpss/rsqrtss: hardware approximations, not exact 1/x */
 
 /* ── Memory offset ──────────────────────────────────────── */
 
@@ -73,7 +74,9 @@ extern uint32_t g_str_a, g_str_b;   /* last REP cmps/scas operand pair (see xbox
 extern double  g_fp_stack[8];       /* GLOBAL x87 FPU stack (recomp bug #8: was per-function
                                      * locals, breaking every cross-function ST0 transfer) */
 extern int     g_fp_top;
-extern uint16_t g_x87_cw;          /* x87 control word (fnstcw/fldcw); default 0x027F */
+extern uint16_t g_x87_cw;          /* x87 control word (fnstcw/fldcw); default 0x007F */
+/* x87 result rounded per the control word's precision bits (PC=00: 24-bit float) */
+static inline double x87_prec(double v) { return (g_x87_cw & 0x300) ? v : (double)(float)v; }
 
 /* frndint honouring the control word's rounding mode (bits 10-11):
  * 0 nearest-even, 1 down, 2 up, 3 toward zero. */
@@ -303,11 +306,13 @@ static __forceinline xmm128_t xmm_sqrtps(xmm128_t a) {
     int _i; for (_i = 0; _i < 4; _i++) a.f[_i] = sqrtf(a.f[_i]); return a;
 }
 static __forceinline xmm128_t xmm_rsqrtps(xmm128_t a) {
-    int _i; for (_i = 0; _i < 4; _i++) a.f[_i] = 1.0f / sqrtf(a.f[_i]); return a;
+    _mm_storeu_ps(a.f, _mm_rsqrt_ps(_mm_loadu_ps(a.f))); return a;
 }
 static __forceinline xmm128_t xmm_rcpps(xmm128_t a) {
-    int _i; for (_i = 0; _i < 4; _i++) a.f[_i] = 1.0f / a.f[_i]; return a;
+    _mm_storeu_ps(a.f, _mm_rcp_ps(_mm_loadu_ps(a.f))); return a;
 }
+static __forceinline float xmm_rcpss(float v) { return _mm_cvtss_f32(_mm_rcp_ss(_mm_set_ss(v))); }
+static __forceinline float xmm_rsqrtss(float v) { return _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(v))); }
 static __forceinline uint32_t xmm_movmskps(xmm128_t a) {
     return (a.u[0] >> 31) | ((a.u[1] >> 31) << 1) | ((a.u[2] >> 31) << 2) | ((a.u[3] >> 31) << 3);
 }

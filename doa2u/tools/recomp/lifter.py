@@ -1369,9 +1369,8 @@ class Lifter:
     FRAME_HELPERS = (_cfg.SEH_PROLOG, _cfg.SEH_EPILOG, _cfg.EH_PROLOG)
 
     def _lift_call(self, insn, ops):
-        # x86 'call' pushes return address then jumps.
-        # With global esp, we push a dummy return address (0) then call.
-        # The callee's 'ret' will pop it back off.
+        # x86 'call' pushes the return address then jumps; push the real one,
+        # since game code reads stale stack slots that hold old return addresses.
         if insn.call_target:
             name = self._call_target_name(insn.call_target)
             if insn.call_target == 0x003354E0 and name == "sub_003354E0":
@@ -1381,7 +1380,7 @@ class Lifter:
                     "/* inline _ftol2 (bug #8) */"
                 ]
             # publish ebp: frame-inheriting callees (fpo_leaf, SEH epilog) read it from g_seh_ebp
-            lines = [f"g_seh_ebp = ebp; PUSH32(esp, 0); {name}(); /* call 0x{insn.call_target:08X} */"]
+            lines = [f"g_seh_ebp = ebp; PUSH32(esp, 0x{insn.end_address:X}); {name}(); /* call 0x{insn.call_target:08X} */"]
             # After __SEH_prolog/__SEH_epilog, read back the frame pointer.
             if insn.call_target in self.FRAME_HELPERS:
                 lines.append("ebp = g_seh_ebp; /* read back frame from SEH helper */")
@@ -1392,7 +1391,7 @@ class Lifter:
             # For esp-relative targets (e.g. `call [esp+0xC]`), pushing first shifts esp
             # so MEM32(esp+X) would read the wrong slot (the just-pushed dummy). The
             # original x86 reads the target at the pre-push esp.
-            return [f"{{ uint32_t _icall_t = {target}; g_seh_ebp = ebp; PUSH32(esp, 0); "
+            return [f"{{ uint32_t _icall_t = {target}; g_seh_ebp = ebp; PUSH32(esp, 0x{insn.end_address:X}); "
                     f"RECOMP_ICALL_SAFE(_icall_t, _icall_esp); }} /* indirect call */"]
         return ["/* call: no target */"]
 
@@ -1721,9 +1720,9 @@ class Lifter:
         if m == "sqrtss" and nops >= 2 and is_xmm(ops[0]):
             return [f"{ops[0].reg}.f[0] = sqrtf({rd_ss(ops[1])}); /* sqrtss */"]
         if m == "rsqrtss" and nops >= 2 and is_xmm(ops[0]):
-            return [f"{ops[0].reg}.f[0] = 1.0f / sqrtf({rd_ss(ops[1])}); /* rsqrtss */"]
+            return [f"{ops[0].reg}.f[0] = xmm_rsqrtss({rd_ss(ops[1])}); /* rsqrtss */"]
         if m == "rcpss" and nops >= 2 and is_xmm(ops[0]):
-            return [f"{ops[0].reg}.f[0] = 1.0f / {rd_ss(ops[1])}; /* rcpss */"]
+            return [f"{ops[0].reg}.f[0] = xmm_rcpss({rd_ss(ops[1])}); /* rcpss */"]
         if m in ("minss", "maxss") and nops >= 2 and is_xmm(ops[0]):
             a, b = f"{ops[0].reg}.f[0]", rd_ss(ops[1])
             cmp = "<" if m == "minss" else ">"
@@ -1845,8 +1844,8 @@ class Lifter:
                     acc = "MEMD" if ops[0].mem_size == 8 else "MEMF"
                     src = f"(double){acc}({_fmt_mem(ops[0])})"
                 if is_rev:
-                    return [f"fp_top() = {src} {sym} fp_top(); /* {m} mem */"]
-                return [f"fp_top() = fp_top() {sym} {src}; /* {m} mem */"]
+                    return [f"fp_top() = x87_prec({src} {sym} fp_top()); /* {m} mem */"]
+                return [f"fp_top() = x87_prec(fp_top() {sym} {src}); /* {m} mem */"]
 
             if len(ops) >= 2 and ops[0].type == "reg" and ops[1].type == "reg":
                 di, si = _st_index(ops[0].reg), _st_index(ops[1].reg)
@@ -1859,9 +1858,9 @@ class Lifter:
                 di, si = (1, 0)  # bare OPp == OPp st(1), st0
             dst, src = _st_lv(di), _st_lv(si)
             if is_rev:
-                stmt = f"{dst} = {src} {sym} {dst};"
+                stmt = f"{dst} = x87_prec({src} {sym} {dst});"
             else:
-                stmt = f"{dst} = {dst} {sym} {src};"
+                stmt = f"{dst} = x87_prec({dst} {sym} {src});"
             if is_pop:
                 stmt += " fp_pop();"
             return [stmt + f" /* {m} {insn.op_str} */"]
@@ -1870,7 +1869,7 @@ class Lifter:
         if m == "fabs":
             return [f"fp_top() = fabs(fp_top()); /* fabs */"]
         if m == "fsqrt":
-            return [f"fp_top() = sqrt(fp_top()); /* fsqrt */"]
+            return [f"fp_top() = x87_prec(sqrt(fp_top())); /* fsqrt */"]
 
         # RECOMP BUG #18: the x87 transcendentals were never lifted -- they
         # fell through to the bare-comment fallback and were dropped, so every
@@ -2101,6 +2100,21 @@ def _insn_writes(insn):
     return regs, mem
 
 
+_REG8 = {"al", "bl", "cl", "dl", "ah", "bh", "ch", "dh"}
+_REG16 = {"ax", "bx", "cx", "dx", "si", "di", "bp", "sp"}
+
+
+def shared_jcc_chain(lifter, target):
+    """([jcc, ...], continue address) when `target` starts with flag-reading jccs."""
+    insn_at = getattr(lifter, "insn_at", None) or {}
+    chain, addr = [], target
+    while (addr in insn_at and insn_at[addr].is_cond_jump
+           and insn_at[addr].mnemonic not in ("jecxz", "jcxz") + tuple(LOOP_MNEMONICS)):
+        chain.append(insn_at[addr])
+        addr = insn_at[addr].end_address
+    return (chain, addr) if chain and addr in insn_at else None
+
+
 def lift_basic_block(lifter, bb, flag_state=None):
     """
     Lift a basic block to C statements.
@@ -2269,6 +2283,41 @@ def lift_basic_block(lifter, bb, flag_state=None):
             note_writes(curr)
             i += 1
             continue
+
+        # shl/shr/sar imm; jb/jae: CF is the last bit shifted out, taken from the pre-shift value
+        nxt = insns[i + 1] if i + 1 < len(insns) else None
+        if (curr.mnemonic in ("shl", "shr", "sar") and nxt is not None
+                and nxt.mnemonic in ("jb", "jc", "jnae", "jae", "jnb", "jnc")
+                and len(curr.operands) == 2 and curr.operands[1].type == "imm"
+                and 1 <= curr.operands[1].imm <= 31):
+            n = curr.operands[1].imm
+            op0 = curr.operands[0]
+            width = 8 * (op0.mem_size if op0.type == "mem" else
+                         1 if op0.reg in _REG8 else 2 if op0.reg in _REG16 else 4)
+            bit = n - 1 if curr.mnemonic != "shl" else width - n
+            if 0 <= bit < width:
+                stmts.append(f"_flags = (int)((((uint32_t)({_fmt_operand_read(curr.operands[0])})) >> {bit}) & 1);"
+                             f" /* CF of {curr.mnemonic} */")
+                stmts.extend(lifter.lift_instruction(curr))
+                neg = "" if nxt.mnemonic in ("jb", "jc", "jnae") else "!"
+                stmts.append(_emit_cond_goto(f"{neg}_flags", nxt.mnemonic, "carry", nxt.jump_target, lifter))
+                last_flag_setter = None
+                last_flag_ops = []
+                i += 2
+                continue
+
+        # cmp/test; jmp onto a shared jcc: that jcc reads THESE flags, not its fall-through's
+        if curr.mnemonic == "jmp" and curr.jump_target and last_flag_setter:
+            chain = shared_jcc_chain(lifter, curr.jump_target)
+            conds = chain and [_make_condition(j.mnemonic, last_flag_setter, last_flag_ops)
+                               for j in chain[0]]
+            if conds and all(conds):
+                for j, (cond_expr, desc) in zip(chain[0], conds):
+                    stmts.append(_emit_cond_goto(latched(cond_expr), j.mnemonic, desc,
+                                                 j.jump_target, lifter))
+                stmts.append(f"goto loc_{chain[1]:08X}; /* jmp 0x{curr.jump_target:08X} */")
+                i += 1
+                continue
 
         # Lift the instruction normally
         results = lifter.lift_instruction(insns[i])

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .config import va_to_file_offset, is_code_address, TEXT_VA_START, TEXT_VA_END
 from .disasm import Disassembler
-from .lifter import Lifter, lift_basic_block
+from .lifter import Lifter, lift_basic_block, shared_jcc_chain
 
 
 class SplitEntryFlags:
@@ -178,7 +178,7 @@ def _fixup_icall_esp_save(lines):
     # For each ICALL, determine where to insert the save
     insert_before = set()  # map: line_index → True (insert save before this line)
     for icall_idx in icall_indices:
-        # The ICALL line itself contains "PUSH32(esp, 0); RECOMP_ICALL_SAFE(...)"
+        # The ICALL line itself contains "PUSH32(esp, <ret>); RECOMP_ICALL_SAFE(...)"
         # Look backwards for consecutive lines containing PUSH32(esp,
         first_push_idx = icall_idx
         j = icall_idx - 1
@@ -203,7 +203,7 @@ def _fixup_icall_esp_save(lines):
                 'return;' in stripped or
                 stripped.startswith('if (') or
                 stripped.startswith('POP32(') or
-                stripped.startswith('PUSH32(esp, 0); sub_')):
+                re.search(r'PUSH32\(esp, 0x[0-9A-F]+\); sub_', stripped)):
                 break
             # It's an interleaved computation - skip past it
             j -= 1
@@ -417,6 +417,7 @@ class FunctionTranslator:
             extra_leaders=switch_leaders if switch_leaders else None)
         if not blocks:
             return None
+        self.lifter.insn_at = {insn.address: insn for insn in instructions}
 
         # Get classification and ABI info
         cls_info = self.classification_db.get(start, {})
@@ -600,6 +601,12 @@ class FunctionTranslator:
                 switch_targets = self.lifter._analyze_switch_table(insn.operands)
                 for t in switch_targets:
                     label_addrs.add(t)
+        # Fall-through of a shared jcc that a `jmp` re-evaluates on its own flags
+        for insn in instructions:
+            if insn.mnemonic == "jmp" and insn.jump_target:
+                chain = shared_jcc_chain(self.lifter, insn.jump_target)
+                if chain:
+                    label_addrs.add(chain[1])
 
         flag_state = None
         self.lifter.rcc_needed = 0
@@ -631,7 +638,7 @@ class FunctionTranslator:
             lines.append(f"")
 
         # Insert _icall_esp save points before RECOMP_ICALL_SAFE arg pushes.
-        # The pattern is: optional PUSH32 args, then PUSH32(esp, 0); RECOMP_ICALL_SAFE(...).
+        # The pattern is: optional PUSH32 args, then PUSH32(esp, <ret>); RECOMP_ICALL_SAFE(...).
         # We insert "uint32_t _icall_esp = g_esp;" before the first arg push.
         lines = _fixup_icall_esp_save(lines)
 
