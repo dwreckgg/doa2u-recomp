@@ -3,13 +3,15 @@
 Translation of the original Xbox binary of Dead or Alive 2 Ultimate into native C
 that compiles and runs on Windows as a native x86-64 executable.
 
-**Status:** Work in progress, matches are playable, but there are visual issues and some game mode specific issues.
+**Status:** Work in progress. Matches are playable, but there are visual issues and some game mode-specific issues.
 
 ## Features
-- (Planned) New online mode added for single and tag matches
 - Capped at 60 FPS
 - Windowed/Borderless and 4:3/16:9 options
 - Internal resolution scaling to 1440p (3x)
+- **Planned:** Working online mode. Either client-hosted like my DOA3 recomp or a dedicated server, hooking into what's there with online mode.
+
+<img width="974" height="582" alt="Screenshot 2026-10-14 214555" src="https://github.com/user-attachments/assets/06569c91-d377-4dd4-b723-37fee6a7d98c" />
 
 ## Building
 
@@ -40,11 +42,11 @@ This project stands on the amazing work of **Ned Heller (sp00nz)**:
 - [burnout3](https://github.com/sp00nznet/burnout3) — the first static recompilation of a retail
   original Xbox game, and the reference this port follows. The NV2A→D3D11 push-buffer translator
   comes from it directly.
-- [doa3-recomp](https://github.com/parkerallan/doa3-recomp) — the Dead or Alive 3 static
-  recompilation project I made, this builds on: the D3D11 rendering/translation, video playback using pl_mpeg, overlay menu system, etc.
 
 Also relies on:
 
+- [doa3-recomp](https://github.com/parkerallan/doa3-recomp) — the Dead or Alive 3 static
+  recompilation project I made. This builds on: the D3D11 rendering/translation, video playback using pl_mpeg, overlay menu system, etc.
 - [Cxbx-Reloaded](https://github.com/Cxbx-Reloaded/Cxbx-Reloaded) — used as a debugging oracle;
   Breakpointing the emulator and diffing its behaviour against ours found most of the bugs.
 - [xemu](https://github.com/xemu-project/xemu) — NV2A documentation and the texture unswizzling
