@@ -947,10 +947,12 @@ static ID3D11RenderTargetView *cur_rtv(void)
     return (g_off_active && g_off_cur >= 0) ? g_offrt[g_off_cur].rtv
                                             : g_device_state.default_rtv;
 }
+static int g_off_share_depth;   /* offscreen target uses the frame's depth buffer */
+void d3d8_SetOffscreenShareDepth(int share) { g_off_share_depth = share; }
 static ID3D11DepthStencilView *cur_dsv(void)
 {
-    return (g_off_active && g_off_cur >= 0) ? g_offrt[g_off_cur].dsv
-                                            : g_device_state.default_dsv;
+    return (g_off_active && g_off_cur >= 0 && !g_off_share_depth) ? g_offrt[g_off_cur].dsv
+                                                                 : g_device_state.default_dsv;
 }
 
 static void offrt_free(OffRT *s)
@@ -1009,8 +1011,8 @@ int d3d8_SetOffscreenTarget(uint32_t key, UINT w, UINT h)
     if (!g_device_state.d3d11_device || !w || !h) return 0;
     slot = offrt_slot(key, w, h);
     if (slot < 0) return 0;
-    ID3D11DeviceContext_OMSetRenderTargets(g_device_state.d3d11_context, 1,
-                                           &g_offrt[slot].rtv, g_offrt[slot].dsv);
+    ID3D11DeviceContext_OMSetRenderTargets(g_device_state.d3d11_context, 1, &g_offrt[slot].rtv,
+                                           g_off_share_depth ? g_device_state.default_dsv : g_offrt[slot].dsv);
     {   /* The translator maps the guest surface onto -1..1 NDC, so the
          * viewport has to be this target's own size. Left at the back
          * buffer's, a 256x512 target (the beach's palm-shadow surface) got
