@@ -938,8 +938,10 @@ typedef struct {
     ID3D11DepthStencilView    *dsv;
     ID3D11ShaderResourceView  *srv;
     UINT w, h;
+    unsigned use;                       /* last bind/sample, for eviction */
 } OffRT;
 static OffRT g_offrt[OFFRT_N];
+static unsigned g_offrt_clock;
 static int   g_off_cur = -1;            /* slot currently bound for rendering */
 
 static ID3D11RenderTargetView *cur_rtv(void)
@@ -975,10 +977,13 @@ static int offrt_slot(uint32_t key, UINT w, UINT h)
         for (i = 0; i < OFFRT_N; i++)
             if (!g_offrt[i].tex) { slot = i; break; }
     if (slot < 0) {
-        /* Full: reuse the last slot rather than grow without bound. */
-        slot = OFFRT_N - 1;
+        /* Full: reuse the least recently used slot. Always taking the last one evicted
+         * the lab glow's blur buffer just before the next pass read it. */
+        slot = 0;
+        for (i = 1; i < OFFRT_N; i++) if (g_offrt[i].use < g_offrt[slot].use) slot = i;
         offrt_free(&g_offrt[slot]);
     }
+    g_offrt[slot].use = ++g_offrt_clock;
     if (slot < 0) return -1;
     if (!g_offrt[slot].rtv || g_offrt[slot].w != w || g_offrt[slot].h != h) {
         D3D11_TEXTURE2D_DESC td; HRESULT hr;
@@ -1060,6 +1065,14 @@ int d3d8_HasOffscreenTexture(uint32_t key)
             return !(g_off_active && g_off_cur == i);
     return 0;
 }
+/* Host texture size of an offscreen target; 0 if there is none. */
+int d3d8_OffscreenTextureSize(uint32_t key, UINT *w, UINT *h)
+{
+    int i;
+    for (i = 0; i < OFFRT_N; i++)
+        if (g_offrt[i].tex && g_offrt[i].key == key) { *w = g_offrt[i].w; *h = g_offrt[i].h; return 1; }
+    return 0;
+}
 
 int d3d8_BindOffscreenTexture(uint32_t key, UINT stage)
 {
@@ -1071,6 +1084,7 @@ int d3d8_BindOffscreenTexture(uint32_t key, UINT stage)
     /* Refuse while this very target is still bound for rendering: D3D11 would
      * silently unbind it and the draw would sample nothing. */
     if (g_off_active && g_off_cur == slot) return 0;
+    g_offrt[slot].use = ++g_offrt_clock;
     if (!g_offrt[slot].srv) {
         if (FAILED(ID3D11Device_CreateShaderResourceView(g_device_state.d3d11_device,
                 (ID3D11Resource *)g_offrt[slot].tex, NULL, &g_offrt[slot].srv)))
