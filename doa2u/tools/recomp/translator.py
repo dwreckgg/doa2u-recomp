@@ -609,6 +609,7 @@ class FunctionTranslator:
                     label_addrs.add(chain[1])
 
         flag_state = None
+        prev_bb, end_flags = None, {}
         self.lifter.rcc_needed = 0
         self.lifter.entry_condition = None
         if instructions[0].is_cond_jump:
@@ -630,8 +631,15 @@ class FunctionTranslator:
             # Propagate flag state from previous block (fallthrough path).
             # This handles patterns like: test eax,eax / ja X / jb Y
             # where jb uses the same flags as ja from the preceding block.
+            if prev_bb is not None and bb.start not in prev_bb.successors:  # no fall-through: lone jcc pred's flags
+                preds = [p for p in blocks if bb.start in p.successors]
+                if (len(preds) == 1 and preds[0].last_insn and preds[0].last_insn.is_cond_jump
+                        and end_flags.get(preds[0].start)):
+                    flag_state = end_flags[preds[0].start]
             stmts, flag_state = lift_basic_block(
                 self.lifter, bb, flag_state=flag_state)
+            end_flags[bb.start] = flag_state
+            prev_bb = bb
             for stmt in stmts:
                 lines.append(f"    {stmt}")
 

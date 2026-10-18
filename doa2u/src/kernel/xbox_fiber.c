@@ -83,6 +83,8 @@ extern void   xbox_xmm_load(const void *src);
 
 static void save_regs(Fiber *f)
 {
+    extern void doa2u_fiber_switch_out(int idx);
+    doa2u_fiber_switch_out((int)(f - g_fib));
     f->r_eax = g_eax; f->r_ecx = g_ecx; f->r_edx = g_edx; f->r_esp = g_esp;
     f->r_ebx = g_ebx; f->r_esi = g_esi; f->r_edi = g_edi; f->r_sehebp = g_seh_ebp;
     memcpy(f->r_fp_stack, g_fp_stack, sizeof(g_fp_stack));
@@ -91,6 +93,8 @@ static void save_regs(Fiber *f)
 }
 static void load_regs(Fiber *f)
 {
+    extern void doa2u_fiber_switch_in(int idx);
+    doa2u_fiber_switch_in((int)(f - g_fib));
     g_eax = f->r_eax; g_ecx = f->r_ecx; g_edx = f->r_edx; g_esp = f->r_esp;
     g_ebx = f->r_ebx; g_esi = f->r_esi; g_edi = f->r_edi; g_seh_ebp = f->r_sehebp;
     memcpy(g_fp_stack, f->r_fp_stack, sizeof(g_fp_stack));
@@ -334,7 +338,8 @@ void xbox_fiber_timeslice(void)
     if (g_cur != 0) {
         /* A worker at a slice point after its 4 ms hands the CPU back (polling CRI servers kept
          * it forever); XAPI coroutines switch explicitly and are left alone. */
-        if (g_fib_slice_due && !g_fib[g_cur].is_coroutine) {
+        extern int doa2u_worker_may_yield(int idx);
+        if (g_fib_slice_due && !g_fib[g_cur].is_coroutine && doa2u_worker_may_yield(g_cur)) {
             g_fib_slice_due = 0;
             xbox_fiber_yield();
         }

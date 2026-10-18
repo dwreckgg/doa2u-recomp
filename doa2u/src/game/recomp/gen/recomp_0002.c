@@ -1,11 +1,67 @@
 /**
  * Dead or Alive 2 Ultimate - Recompiled code chunk 2
- * Functions: 1000 (0x0006B5E0 - 0x00098AD6)
+ * Functions: 1000 (0x0006B560 - 0x00098A29)
  */
 
 #define RECOMP_GENERATED_CODE
 #include "recomp_funcs.h"
 #include <math.h>
+
+/**
+ * sub_0006B560
+ * Original: 0x0006B560 - 0x0006B597 (55 bytes, 16 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_0006B560(void)
+{
+    uint32_t ebp;
+    ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
+
+loc_0006B560: ;
+    esp = esp - 8;
+    eax = MEM32(esp + 0x14);
+    edx = MEM32(esp + 0x10);
+    xmm0 = xmm_zero(); /* xorps self */
+    PUSH32(esp, eax);
+    eax = MEM32(esp + 0x10);
+    ecx = esp + 4;
+    PUSH32(esp, ecx);
+    PUSH32(esp, edx);
+    xmm_store_ss(esp + 0xC, xmm0); /* movss */
+    xmm0 = xmm_load_ss(0x3C1A44); /* movss */
+    PUSH32(esp, eax);
+    xmm_store_ss(esp + 0x14, xmm0); /* movss */
+    g_seh_ebp = ebp; PUSH32(esp, 0x6B593); sub_000AB2D0(); /* call 0x000AB2D0 */
+
+loc_0006B593: ;
+    esp = esp + 0x18;
+    esp += 4; return; /* ret */
+
+}
+
+/**
+ * sub_0006B5A0
+ * Original: 0x0006B5A0 - 0x0006B5D4 (52 bytes, 10 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_0006B5A0(void)
+{
+
+loc_0006B5A0: ;
+    SET_LO16(eax, MEM16(esp + 4));
+    SET_LO16(ecx, MEM16(esp + 8));
+    SET_LO16(edx, MEM16(esp + 0xC));
+    MEM16(0x678AEA) = LO16(eax);
+    SET_LO16(eax, MEM16(esp + 0x10));
+    MEM16(0x678AF0) = LO16(eax);
+    MEM16(0x678AEC) = LO16(ecx);
+    MEM16(0x678AEE) = LO16(edx);
+    eax = 1;
+    esp += 4; return; /* ret */
+
+}
 
 /**
  * sub_0006B5E0
@@ -74645,7 +74701,7 @@ loc_00092293: ;
     esp += 4; return; /* ret */
 
 loc_00092298: ;
-    if (((int32_t)eax >= 0)) goto loc_000922A1; /* jge: greater or equal (signed >=) */
+    if (CMP_GE(eax, ecx)) goto loc_000922A1; /* jge: greater or equal (signed >=) */
 
 loc_0009229A: ;
     eax = 1;
@@ -87174,7 +87230,7 @@ loc_000989A3: ;
     esp += 4; return; /* ret */
 
 loc_000989A8: ;
-    if (1) goto loc_000989B1; /* jae: above or equal (unsigned >=) */
+    if (CMP_AE(eax, ecx)) goto loc_000989B1; /* jae: above or equal (unsigned >=) */
 
 loc_000989AA: ;
     eax = 1;
@@ -87377,46 +87433,4 @@ loc_00098AB0: ;
     #undef fp_popp
     #undef fp_top
     #undef fp_st1
-}
-
-/**
- * sub_00098AC0
- * Original: 0x00098AC0 - 0x00098AD6 (22 bytes, 8 insns)
- * CC: cdecl, 0 params, returns int_or_void
- * Frame: fpo_leaf
- */
-void sub_00098AC0(void)
-{
-    uint32_t ebp;
-    ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
-    int _flags = 0; /* fallback flag var */
-
-loc_00098AC0: ;
-    eax = MEM32(esp + 4);
-    ecx = MEM32(esp + 8);
-    eax = MEM32(eax + 4);
-    ecx = MEM32(ecx + 4);
-    if (CMP_BE(eax, ecx)) { g_seh_ebp = ebp; sub_00098AD6(); return; } /* jbe: below or equal (unsigned <=) */
-
-loc_00098AD2: ;
-    eax = eax | 0xFFFFFFFFu;
-    esp += 4; return; /* ret */
-
-}
-
-/**
- * sub_00098AD6
- * Original: 0x00098AD6 - 0x00098AE0 (10 bytes, 8 insns)
- * CC: cdecl, 0 params, returns int_or_void
- * Frame: fpo_leaf
- */
-void sub_00098AD6(void)
-{
-    int _cf = 0; /* carry flag */
-
-loc_00098AD6: ;
-    eax = _cf ? 0xFFFFFFFF : 0; /* sbb self (CF extend) */
-    eax = (uint32_t)(-(int32_t)eax);
-    esp += 4; return; /* ret */
-
 }

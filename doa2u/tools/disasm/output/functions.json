@@ -11467,6 +11467,19 @@
   "called_by": []
  },
  {
+  "start": "0x000273A0",
+  "end": "0x00027460",
+  "size": 192,
+  "name": "sub_000273A0",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
+  "called_by": []
+ },
+ {
   "start": "0x00027460",
   "end": "0x0002749F",
   "size": 63,
@@ -12653,6 +12666,19 @@
   "end": "0x0002A210",
   "size": 1059,
   "name": "sub_00029DED",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
+  "called_by": []
+ },
+ {
+  "start": "0x0002A0D0",
+  "end": "0x0002A210",
+  "size": 320,
+  "name": "sub_0002A0D0",
   "section": ".text",
   "confidence": 0.5,
   "detection_method": "link_seed",
@@ -101859,6 +101885,19 @@
   "called_by": []
  },
  {
+  "start": "0x0011B260",
+  "end": "0x0011B290",
+  "size": 48,
+  "name": "sub_0011B260",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
+  "called_by": []
+ },
+ {
   "start": "0x0011B290",
   "end": "0x0011B2A0",
   "size": 16,
@@ -130550,6 +130589,19 @@
   "end": "0x0016B2E0",
   "size": 1093,
   "name": "sub_0016AE9B",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
+  "called_by": []
+ },
+ {
+  "start": "0x0016B1B0",
+  "end": "0x0016B2E0",
+  "size": 304,
+  "name": "sub_0016B1B0",
   "section": ".text",
   "confidence": 0.5,
   "detection_method": "link_seed",
@@ -232671,6 +232723,19 @@
   "called_by": []
  },
  {
+  "start": "0x002A9160",
+  "end": "0x002A9190",
+  "size": 48,
+  "name": "sub_002A9160",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
+  "called_by": []
+ },
+ {
   "start": "0x002A9190",
   "end": "0x002A91B0",
   "size": 32,
@@ -235667,6 +235732,19 @@
   "called_by": []
  },
  {
+  "start": "0x002B0D50",
+  "end": "0x002B0F20",
+  "size": 464,
+  "name": "sub_002B0D50",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
+  "called_by": []
+ },
+ {
   "start": "0x002B0F20",
   "end": "0x002B11E6",
   "size": 710,
@@ -235739,6 +235817,19 @@
   "end": "0x002B1E90",
   "size": 1392,
   "name": "sub_002B1920",
+  "section": ".text",
+  "confidence": 0.5,
+  "detection_method": "link_seed",
+  "num_instructions": 0,
+  "has_prologue": false,
+  "calls_to": [],
+  "called_by": []
+ },
+ {
+  "start": "0x002B1CC0",
+  "end": "0x002B1E90",
+  "size": 464,
+  "name": "sub_002B1CC0",
   "section": ".text",
   "confidence": 0.5,
   "detection_method": "link_seed",

@@ -1,11 +1,146 @@
 /**
  * Dead or Alive 2 Ultimate - Recompiled code chunk 23
- * Functions: 558 (0x003B4AB6 - 0x003C146C)
+ * Functions: 565 (0x003B4A66 - 0x003C146C)
  */
 
 #define RECOMP_GENERATED_CODE
 #include "recomp_funcs.h"
 #include <math.h>
+
+/**
+ * sub_003B4A66
+ * Original: 0x003B4A66 - 0x003B4A68 (2 bytes, 1 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_003B4A66(void)
+{
+
+loc_003B4A66: ;
+    MEM32(edi) = ecx;
+
+    sub_003B4A68(); return; /* restored dropped fall-through to sub_003B4A68 */
+}
+
+/**
+ * sub_003B4A68
+ * Original: 0x003B4A68 - 0x003B4A6D (5 bytes, 3 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_003B4A68(void)
+{
+
+loc_003B4A68: ;
+    POP32(esp, edi);
+    POP32(esp, esi);
+    esp += 12; return; /* ret 8 */
+
+}
+
+/**
+ * sub_003B4A6D
+ * Original: 0x003B4A6D - 0x003B4A81 (20 bytes, 7 insns)
+ * Category: game_network
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_003B4A6D(void)
+{
+    uint32_t ebp;
+    ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
+
+loc_003B4A6D: ;
+    eax = MEM32(esp + 4);
+    ecx = eax + 0x18;
+    PUSH32(esp, ecx);
+    eax = eax + 0x1C;
+    PUSH32(esp, eax);
+    g_seh_ebp = ebp; PUSH32(esp, 0x3B4A7E); sub_003B4A0D(); /* call 0x003B4A0D */
+
+loc_003B4A7E: ;
+    esp += 8; return; /* ret 4 */
+
+}
+
+/**
+ * sub_003B4A81
+ * Original: 0x003B4A81 - 0x003B4A96 (21 bytes, 6 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_003B4A81(void)
+{
+    uint32_t ebp;
+    int _flags = 0; /* fallback flag var */
+    ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
+
+loc_003B4A81: ;
+    eax = MEM32(esp + 4);
+    eax = MEM32(eax + 0x18);
+    if (CMP_BE(eax, 0x198)) { g_seh_ebp = ebp; sub_003B4A96(); return; } /* jbe: below or equal (unsigned <=) */
+
+loc_003B4A8F: ;
+    eax = 0x8015C005u;
+    g_seh_ebp = ebp; sub_003B4AA1(); return; /* tail jmp 0x003B4AA1 */
+
+}
+
+/**
+ * sub_003B4A96
+ * Original: 0x003B4A96 - 0x003B4AA1 (11 bytes, 4 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_003B4A96(void)
+{
+
+loc_003B4A96: ;
+    ecx = MEM32(esp + 8);
+    eax = eax + 0x1C;
+    MEM32(ecx) = eax;
+    eax = 0; /* xor self */
+
+    sub_003B4AA1(); return; /* restored dropped fall-through to sub_003B4AA1 */
+}
+
+/**
+ * sub_003B4AA1
+ * Original: 0x003B4AA1 - 0x003B4AA4 (3 bytes, 1 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_003B4AA1(void)
+{
+
+loc_003B4AA1: ;
+    esp += 12; return; /* ret 8 */
+
+}
+
+/**
+ * sub_003B4AA4
+ * Original: 0x003B4AA4 - 0x003B4AB6 (18 bytes, 6 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_003B4AA4(void)
+{
+    uint32_t ebp;
+    int _flags = 0; /* fallback flag var */
+    ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
+
+loc_003B4AA4: ;
+    if (CMP_BE(MEM32(esp + 4), 0)) { g_seh_ebp = ebp; sub_003B4AB6(); return; } /* jbe: below or equal (unsigned <=) */
+
+loc_003B4AAB: ;
+    if (CMP_A(MEM32(esp + 4), 5)) { g_seh_ebp = ebp; sub_003B4AB6(); return; } /* ja: above (unsigned >) */
+
+loc_003B4AB2: ;
+    eax = 0; /* xor self */
+    g_seh_ebp = ebp; sub_003B4ABB(); return; /* tail jmp 0x003B4ABB */
+
+}
 
 /**
  * sub_003B4AB6

@@ -178,6 +178,35 @@ void sub_003447D0(void)
 /* Worker timeslice: every 4 ms the game thread hands the CRI server fibers a slice,
  * standing in for preemption (the game's load waits never block). */
 int doa2u_workers_may_run(void) { return 1; }
+/* A worker that entered the CRI server (guard 0xF2BC38) or took its file lock keeps the CPU:
+ * the load coroutine spins on both without yielding, so a handoff there never comes back. */
+static int s_cri_owner[2] = { -1, -1 }, s_cri_set_in[2];
+static const uint32_t s_cri_flag[2] = { 0xF2BC38u, 0xF2AF50u };
+void doa2u_fiber_switch_in(int idx)
+{
+    int k;
+    for (k = 0; k < 2; k++) {
+        if (!MEM32(s_cri_flag[k])) s_cri_owner[k] = -1;
+        s_cri_set_in[k] = MEM32(s_cri_flag[k]) != 0;
+    }
+    (void)idx;
+}
+void doa2u_fiber_switch_out(int idx)
+{
+    int k;
+    for (k = 0; k < 2; k++)
+        if (MEM32(s_cri_flag[k]) && !s_cri_set_in[k] && s_cri_owner[k] < 0) s_cri_owner[k] = idx;
+}
+int doa2u_worker_may_yield(int idx)
+{
+    int k, ok = 1;
+    for (k = 0; k < 2; k++) {
+        if (!MEM32(s_cri_flag[k])) { s_cri_owner[k] = -1; continue; }
+        if (!s_cri_set_in[k] && s_cri_owner[k] < 0) s_cri_owner[k] = idx;   /* set during this run */
+        if (s_cri_owner[k] == idx) ok = 0;
+    }
+    return ok;
+}
 /* Display size from the guest's D3DPRESENT_PARAMETERS (0x00E658F0), the space of
  * 2D overlay coordinates. Returns 0 before CreateDevice fills it. */
 int doa2u_guest_display_size(unsigned *w, unsigned *h)
@@ -392,6 +421,65 @@ void sub_00335A80(void)
 /* No GPU behind the push-buffer ring: KickOff translates new commands to D3D11 and
  * retires them like the XDK's GPU-less branch (GET == PUT, all fences done). */
 static uint32_t g_pb_parsed = 0;     /* next push-buffer word not yet translated */
+static uint32_t g_pb_cb_arg[2];      /* 0x1D8C / 0x1D90: InsertCallback routine, context */
+static uint32_t g_pb_cbq[64][2], g_pb_cbq_n;
+static uint32_t g_zpass_acc;
+
+/* Visibility tests: ZPASS count via a host occlusion query, GET_REPORT writes the
+ * XDK report slot {time, count, done}; NOP 6/7 queues the inserted GPU callback. */
+static void pb_side_method(uint32_t method, uint32_t param)
+{
+    extern void d3d8_OcclusionBegin(void);
+    extern uint32_t d3d8_OcclusionEnd(void);
+    switch (method) {
+    case 0x17C8: if (param == 1) g_zpass_acc = 0; break;            /* CLEAR_REPORT_VALUE */
+    case 0x17CC:                                                    /* ZPASS_PIXEL_COUNT_ENABLE */
+        if (param) d3d8_OcclusionBegin(); else g_zpass_acc += d3d8_OcclusionEnd();
+        break;
+    case 0x17D0:                                                    /* GET_REPORT */
+        {   /* Host heap pages sit above the 16 MB the 24-bit offset covers: match the
+             * offset against the device's report pages (dev+0x7D4) instead. */
+            uint32_t dev = MEM32(D3D_G_PDEVICE), va = 0, k;
+            for (k = 0; dev && k < 64 && !va; k++) {
+                uint32_t pg = MEM32(dev + 0x7D4 + k * 4);
+                if (pg && !((pg ^ param) & 0x00FFF000u) && MEM32(pg + (param & 0xFF0u) + 0xC) == 0xFFFFFFFFu)
+                    va = pg + (param & 0xFF0u);
+            }
+            if (va) {
+                MEM32(va) = GetTickCount(); MEM32(va + 4) = 0;
+                MEM32(va + 8) = g_zpass_acc;
+                MEM32(va + 0xC) = 0;
+            }
+        }
+        break;
+    case 0x1D8C: g_pb_cb_arg[0] = param; break;
+    case 0x1D90: g_pb_cb_arg[1] = param; break;
+    case 0x0100:
+        if ((param == 6 || param == 7) && g_pb_cb_arg[0] && g_pb_cbq_n < 64) {
+            g_pb_cbq[g_pb_cbq_n][0] = g_pb_cb_arg[0];
+            g_pb_cbq[g_pb_cbq_n][1] = g_pb_cb_arg[1];
+            g_pb_cbq_n++;
+        }
+        break;
+    }
+}
+
+/* Run the callbacks the translated commands reached, once the walker is done. */
+static void pb_run_callbacks(void)
+{
+    uint32_t i, n = g_pb_cbq_n;
+    g_pb_cbq_n = 0;
+    for (i = 0; i < n; i++) {
+        recomp_func_t fn = recomp_lookup_manual(g_pb_cbq[i][0]);
+        uint32_t sv[7] = { eax, ebx, ecx, edx, esi, edi, esp };
+        if (!fn) fn = recomp_lookup(g_pb_cbq[i][0]);
+        if (!fn) continue;
+        PUSH32(esp, g_pb_cbq[i][1]);
+        PUSH32(esp, 0);                       /* dummy return */
+        fn();
+        eax = sv[0]; ebx = sv[1]; ecx = sv[2]; edx = sv[3]; esi = sv[4]; edi = sv[5]; esp = sv[6];
+    }
+}
 
 /* Translate [from, to). Stops at a JUMP/CALL/RETURN (wrap) and returns the
  * address it stopped at. */
@@ -415,9 +503,10 @@ static uint32_t pb_translate(uint32_t from, uint32_t to)
                 pos += 4;
                 if (pos + count * 4 > to) return to;
                 for (i = 0; i < count; i++) {
-                    uint32_t param = MEM32(pos); pos += 4;
-                    pgraph_d3d11_method((int)subchan,
-                                        (kind == 0) ? method + i * 4 : method, param);
+                    uint32_t param = MEM32(pos), m = (kind == 0) ? method + i * 4 : method;
+                    pos += 4;
+                    pgraph_d3d11_method((int)subchan, m, param);
+                    pb_side_method(m, param);
                 }
             } else {
                 pos += 4;
@@ -455,6 +544,7 @@ void sub_00349E80(void)   /* CDevice_KickOff(this = ecx), ret */
         uint32_t flags  = MEM32(dev + 8);
         uint32_t cursor = (flags & 4) ? MEM32(dev + 0x770) : MEM32(dev);
         pb_translate_pending(dev, cursor);
+        pb_run_callbacks();
         MEM32(dev + 0x1C20) = D3D_FAKE_CHANNEL;
         MEM32(D3D_FAKE_CHANNEL + 0x40) = cursor & 0x0FFFFFFFu;   /* DMA_PUT */
         MEM32(D3D_FAKE_CHANNEL + 0x44) = cursor & 0x0FFFFFFFu;   /* DMA_GET == PUT */

@@ -253,6 +253,33 @@ void d3d8_ResetScissorRect(void)
     d3d8_SetScissorRect(0, 0, (int)g_device_state.width, (int)g_device_state.height);
 }
 
+/* NV097 ZPASS pixel counting (visibility tests) as a D3D11 occlusion query. */
+static ID3D11Query *g_occl_query;
+static int g_occl_active;
+void d3d8_OcclusionBegin(void)
+{
+    if (!g_device_state.d3d11_device || g_occl_active) return;
+    if (!g_occl_query) {
+        D3D11_QUERY_DESC qd = { D3D11_QUERY_OCCLUSION, 0 };
+        if (FAILED(ID3D11Device_CreateQuery(g_device_state.d3d11_device, &qd, &g_occl_query)))
+            return;
+    }
+    ID3D11DeviceContext_Begin(g_device_state.d3d11_context, (ID3D11Asynchronous *)g_occl_query);
+    g_occl_active = 1;
+}
+
+uint32_t d3d8_OcclusionEnd(void)
+{
+    UINT64 n = 0;
+    if (!g_occl_active) return 0;
+    g_occl_active = 0;
+    ID3D11DeviceContext_End(g_device_state.d3d11_context, (ID3D11Asynchronous *)g_occl_query);
+    while (ID3D11DeviceContext_GetData(g_device_state.d3d11_context, (ID3D11Asynchronous *)g_occl_query,
+                                       &n, sizeof n, 0) == S_FALSE)
+        ;
+    return (uint32_t)n;
+}
+
 UINT                 d3d8_GetBackbufferHeight(void) { return g_device_state.height; }
 const DWORD         *d3d8_GetRenderStates(void) { return g_device_state.render_states; }
 const DWORD         *d3d8_GetTSS(DWORD stage) { return (stage < MAX_TEXTURE_STAGES) ? g_device_state.tss[stage] : NULL; }

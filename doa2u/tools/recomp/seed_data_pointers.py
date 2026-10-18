@@ -46,8 +46,8 @@ def at_boundary(va, skip_table=True):
     # a switch jump table the compiler placed inline after the previous
     # function (e.g. sub_00065DC0, script opcode 0x39, behind the table of
     # sub_00065C40): skip back over its code-address dwords
-    # (MSVC 16-aligns the function after the table)
-    if (skip_table and va % 16 == 0 and not in_function(va)
+    # (MSVC 16-aligns the function after the table; the detector may overrun it)
+    if (skip_table and va % 16 == 0 and byte_at(va) != 0x00
             and not is_code_address(dword_at(va) or 0)):
         p = va
         while is_code_address(dword_at(p - 4) or 0):

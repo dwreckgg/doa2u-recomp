@@ -1996,6 +1996,13 @@ static void nv_apply_draw_state(IDirect3DDevice8 *dev, const NvDrawSummary *sum,
                 dev->lpVtbl->SetTextureStageState(dev, 0, 1 /*COLOROP*/, 2 /*SELECTARG1*/);
                 dev->lpVtbl->SetTextureStageState(dev, 0, 2 /*COLORARG1*/, 2 /*TEXTURE*/);
             }
+            /* One combiner stage, rgb r0 = t0 x 1 (ICW 08200000, OCW 00000C00): the Island sky.
+             * Lighting is on but unused, so modulating by it darkened the sky to 40%. */
+            if (!tex_alpha_only && (g_pg.comb_control & 0xFF) == 1 &&
+                g_pg_reg[0x0AC0 >> 2] == 0x08200000u && g_pg_reg[0x1E40 >> 2] == 0x00000C00u) {
+                dev->lpVtbl->SetTextureStageState(dev, 0, 1 /*COLOROP*/, 2 /*SELECTARG1*/);
+                dev->lpVtbl->SetTextureStageState(dev, 0, 2 /*COLORARG1*/, 2 /*TEXTURE*/);
+            }
             /* Stage 0 MODULATEALPHA_ADDCOLOR(TEXTURE, DIFFUSE): the castle's
              * stone walls (DXT5, alpha blend on). The image's alpha is a
              * lighting mask -- colour = texture + texture.a * lit diffuse --
