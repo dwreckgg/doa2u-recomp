@@ -620,6 +620,7 @@ void sub_0034AF80(void)
             pgraph_d3d11_flush();
             doa2u_present_frame();
         }
+        {   extern void doa2u_rdtsc_frame(void); doa2u_rdtsc_frame(); }   /* one vblank of rdtsc time */
         if (dev) {
             uint32_t ev = dev + DEV_VBLANK_EVENT_OFS;
             uint32_t cb = MEM32(dev + DEV_VBLANK_CB_OFS);

@@ -1039,10 +1039,14 @@ static int n2ps_generate(const Nv2aPSKey *k, char *buf, int cap)
     int off = 0, i, n = (int)(k->comb_control & 0xFF);
     int msb = (k->comb_control >> 8) & 1;
     char A[96], B[96], C[96], D[96], fmt[160];
+    /* texm3x2tex (DOTPRODUCT 1, DOT_ST 2, stage 3 off): the Safari heat-haze refraction.
+     * Each stage's texcoord r arrives in tr, q in tq. */
+    int dot_st = (k->shader_prog & 0xFFFE0) == ((9u << 10) | (17u << 5));
     if (n < 1) n = 1;
     if (n > 8) n = 8;
     for (i = 0; i < 4; i++) {
         uint32_t m = (k->shader_prog >> (5 * i)) & 31;
+        if (dot_st && i > 0) continue;
         if (m != 0 && m != 1 && m != 6) return -1;
         if (m == 6 && i == 0) return -1;
     }
@@ -1050,16 +1054,29 @@ static int n2ps_generate(const Nv2aPSKey *k, char *buf, int cap)
            "Texture2D tex2 : register(t2); Texture2D tex3 : register(t3);\n"
            "SamplerState s0 : register(s0); SamplerState s1 : register(s1);\n"
            "SamplerState s2 : register(s2); SamplerState s3 : register(s3);\n"
-           "cbuffer N2 : register(b0) { float4 c0[8]; float4 c1[8]; float4 fogc; float4 bm[4]; float aref; float3 pad; };\n"
+           "cbuffer N2 : register(b0) { float4 c0[8]; float4 c1[8]; float4 fogc; float4 bm[4]; float aref; float2 dsts; float pad; };\n"
+           "float3 dm0(float4 c) { return c.rgb; }\n"
+           "float3 dm1(float4 c) { return (c.rgb * 255.0 - 128.0) / 127.0; }\n"
+           "float3 dm2(float4 c) { float3 x = c.rgb * 255.0; return (x >= 128.0) ? (x - 255.5) / 127.5 : (x + 0.5) / 127.5; }\n"
+           "float3 dm3(float4 c) { float3 x = c.rgb * 255.0; return (x >= 128.0) ? (x - 256.0) / 127.0 : x / 127.0; }\n"
            "struct PS_IN { float4 pos : SV_POSITION; float4 d0 : COLOR0; float4 d1 : COLOR1;\n"
-           "  float2 tc0 : TEXCOORD0; float2 tc1 : TEXCOORD1; float2 tc2 : TEXCOORD2; float2 tc3 : TEXCOORD3; float fog : TEXCOORD4; };\n"
+           "  float2 tc0 : TEXCOORD0; float2 tc1 : TEXCOORD1; float2 tc2 : TEXCOORD2; float2 tc3 : TEXCOORD3; float fog : TEXCOORD4;\n"
+           "  float4 tq : TEXCOORD5; float4 tr : TEXCOORD6; };\n"
            "float4 main(PS_IN i) : SV_TARGET {\n"
            "  float4 zero = 0, t0 = 0, t1 = 0, t2 = 0, t3 = 0, fogr = fogc, v0 = i.d0, v1 = i.d1;\n");
     for (i = 0; i < 4; i++) {
         uint32_t m = (k->shader_prog >> (5 * i)) & 31;
         int src = (i == 2) ? (int)((k->other_input >> 16) & 1) : (i == 3) ? (int)((k->other_input >> 20) & 3) : 0;
-        if (m == 1) N2EMIT("  t%d = tex%d.Sample(s%d, i.tc%d);\n", i, i, i, i);
-        if (m == 6) N2EMIT("  { float2 d = t%d.rg; t%d = tex%d.Sample(s%d, i.tc%d + float2(bm[%d].x * d.x + bm[%d].z * d.y, bm[%d].y * d.x + bm[%d].w * d.y)); }\n",
+        if (dot_st && i == 3) continue;
+        if (dot_st && i > 0) {
+            uint32_t map = (k->dot_map >> (4 * (i - 1))) & 7;
+            if (map > 3) return -1;
+            N2EMIT("  float dot%d = dot(float3(i.tc%d, i.tr[%d]), dm%u(t%d));\n", i, i, i, map, src);
+            if (i == 2) N2EMIT("  t2 = tex2.Sample(s2, float2(dot1, dot2) * dsts);\n");
+            continue;
+        }
+        if (m == 1) N2EMIT("  t%d = tex%d.Sample(s%d, i.tc%d / i.tq[%d]);\n", i, i, i, i, i);   /* PROJECT2D: s/q, t/q */
+        if (m == 6) N2EMIT("  { float2 d = t%d.rg; t%d =tex%d.Sample(s%d, i.tc%d + float2(bm[%d].x * d.x + bm[%d].z * d.y, bm[%d].y * d.x + bm[%d].w * d.y)); }\n",
                            src, i, i, i, i, i, i, i, i);
     }
     N2EMIT("  float4 r0 = float4(0, 0, 0, t0.a), r1 = 0;\n");

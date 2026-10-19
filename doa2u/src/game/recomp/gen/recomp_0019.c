@@ -48555,7 +48555,7 @@ void sub_0034D820(void)
 {
 
 loc_0034D820: ;
-    /* TODO: rdtsc  */
+    { uint64_t _tsc = doa2u_rdtsc(); eax = (uint32_t)_tsc; edx = (uint32_t)(_tsc >> 32); } /* rdtsc */
     esp += 4; return; /* ret */
 
 }

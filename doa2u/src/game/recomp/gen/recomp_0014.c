@@ -33907,7 +33907,7 @@ void sub_002BAD6B(void)
 
 loc_002BAD6B: ;
     ecx = MEM32(esp + 4);
-    /* TODO: rdtsc  */
+    { uint64_t _tsc = doa2u_rdtsc(); eax = (uint32_t)_tsc; edx = (uint32_t)(_tsc >> 32); } /* rdtsc */
     MEM32(ecx) = eax;
     MEM32(ecx + 4) = edx;
     eax = 0; /* xor self */

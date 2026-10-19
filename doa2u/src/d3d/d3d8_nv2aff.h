@@ -58,6 +58,7 @@ typedef struct {
     uint32_t c_icw[8], c_ocw[8], a_icw[8], a_ocw[8];
     uint32_t final0, final1;
     uint32_t alpha_test, alpha_func;
+    uint32_t dot_map;              /* NV097_SET_DOT_RGBMAPPING */
 } Nv2aPSKey;
 
 typedef struct {
@@ -65,7 +66,8 @@ typedef struct {
     float    fog[4];               /* fog colour rgb, factor in a */
     float    bump[4][4];           /* per stage: m00 m01 m10 m11 */
     float    alpha_ref;
-    float    pad[3];
+    float    dot_st_scale[2];      /* DOT_ST result -> 0..1 (1/rect size for a linear texture) */
+    float    pad;
 } Nv2aPSConsts;
 
 /* d3d8_combiners.c: arm the shader for the next draw; 0 if it cannot be built. */

@@ -758,6 +758,26 @@ static void bridge_KeQueryPerformanceCounter(void)
     g_edx = (uint32_t)(v >> 32);
 }
 
+/* rdtsc at 733.33 MHz, 1/60 s per presented frame like the vblank-locked console (the Safari
+ * water sim runs only above 59.3 fps); each read adds 1 us so wait loops still see time pass. */
+static uint64_t s_tsc_base, s_tsc_now;
+uint64_t doa2u_rdtsc(void)
+{
+    if (g_xbox_det_active) {
+        static uint64_t s_freq;
+        uint64_t q = xbox_det_qpc();
+        if (!s_freq) { LARGE_INTEGER f = xbox_KeQueryPerformanceFrequency(); s_freq = (uint64_t)f.QuadPart ? (uint64_t)f.QuadPart : 1; }
+        return (q / s_freq) * 733333333ull + (q % s_freq) * 733333333ull / s_freq;
+    }
+    s_tsc_now += 733;
+    return s_tsc_now;
+}
+void doa2u_rdtsc_frame(void)
+{
+    s_tsc_base += 733333333ull / 60;
+    if (s_tsc_now < s_tsc_base) s_tsc_now = s_tsc_base;
+}
+
 static void bridge_KeQueryPerformanceFrequency(void)
 {
     LARGE_INTEGER li = xbox_KeQueryPerformanceFrequency();

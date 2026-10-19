@@ -77,6 +77,8 @@ extern int     g_fp_top;
 extern uint16_t g_x87_cw;          /* x87 control word (fnstcw/fldcw); default 0x007F */
 /* x87 result rounded per the control word's precision bits (PC=00: 24-bit float) */
 static inline double x87_prec(double v) { return (g_x87_cw & 0x300) ? v : (double)(float)v; }
+/* rdtsc: Xbox time-stamp counter at 733.33 MHz (kernel_bridge.c) */
+uint64_t doa2u_rdtsc(void);
 
 /* frndint honouring the control word's rounding mode (bits 10-11):
  * 0 nearest-even, 1 down, 2 up, 3 toward zero. */

@@ -1064,6 +1064,10 @@ class Lifter:
                     _fmt_operand_write(ops[1], "_xa_old"),
                     _fmt_operand_write(ops[0], "_xa_sum") + " } /* xadd */"]
 
+        # rdtsc: the Xbox 733.33 MHz time-stamp counter (XAPI QueryPerformanceCounter is just this)
+        if m == "rdtsc":
+            return ["{ uint64_t _tsc = doa2u_rdtsc(); eax = (uint32_t)_tsc; edx = (uint32_t)(_tsc >> 32); } /* rdtsc */"]
+
         # ── SSE (scalar float) ──
         if m in ("movss", "movsd", "movaps", "movups", "movlps", "movhps",
                  "movntps", "movlhps", "movhlps", "sqrtps", "rsqrtps", "rcpps",

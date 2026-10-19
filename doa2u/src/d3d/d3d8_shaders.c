@@ -77,6 +77,8 @@ static const char g_vs_source[] =
     "    float2 tex1     : TEXCOORD1;\n"
     "    float2 tex2     : TEXCOORD2;\n"
     "    float2 tex3     : TEXCOORD3;\n"
+    "    float4 texq     : TEXCOORD5;\n"
+    "    float4 texr     : TEXCOORD6;\n"
     "};\n"
     "\n"
     "struct VS_OUT {\n"
@@ -88,6 +90,8 @@ static const char g_vs_source[] =
     "    float2 tex2     : TEXCOORD2;\n"
     "    float2 tex3     : TEXCOORD3;\n"
     "    float  fog      : TEXCOORD4;\n"
+    "    float4 texq     : TEXCOORD5;\n"   /* appended last: the other pixel shaders' inputs are unchanged */
+    "    float4 texr     : TEXCOORD6;\n"
     "};\n"
     "\n"
     /* Flags bits */
@@ -98,6 +102,7 @@ static const char g_vs_source[] =
     "#define FLAG_HAS_SPECULAR   0x04u\n"
     "#define FLAG_HAS_NORMAL     0x08u\n"
     "#define FLAG_LIGHTING       0x10u\n"
+    "#define FLAG_HAS_QR         0x8000u\n"
     "\n"
     "float compute_fog(float dist) {\n"
     "    uint mode = (uint)FogParams.w;\n"
@@ -120,6 +125,8 @@ static const char g_vs_source[] =
     "    o.tex3 = input.tex3;\n"
     "    o.fog = 1.0;\n"
     "    o.specular = float4(0, 0, 0, 0);\n"
+    "    o.texq = (Flags & FLAG_HAS_QR) ? input.texq : float4(1, 1, 1, 1);\n"
+    "    o.texr = (Flags & FLAG_HAS_QR) ? input.texr : float4(0, 0, 0, 0);\n"
     "\n"
     "    if (Flags & FLAG_PRETRANSFORMED) {\n"
     /* DOA2U: XYZRHW carries rhw = 1/w of the original clip-space vertex.
@@ -539,6 +546,13 @@ static ID3D11InputLayout *get_or_create_layout(DWORD fvf)
                 elem_count++;
             }
         }
+        /* q and r per stage; absent, the shader substitutes 1 and 0 (FLAG_HAS_QR clear) */
+        for (t = 5; t <= 6; t++) {
+            elems[elem_count] = (D3D11_INPUT_ELEMENT_DESC){"TEXCOORD", t, DXGI_FORMAT_R32G32B32A32_FLOAT, 0,
+                                                           (fvf & D3DFVF_NV2A_QR) ? offset : 0, D3D11_INPUT_PER_VERTEX_DATA, 0};
+            elem_count++;
+            if (fvf & D3DFVF_NV2A_QR) offset += 16;
+        }
     }
 
     {
@@ -804,6 +818,7 @@ void d3d8_shaders_prepare_draw(DWORD fvf)
         if (fvf & D3DFVF_DIFFUSE) cb->flags |= 0x02;
         if (fvf & D3DFVF_SPECULAR) cb->flags |= 0x04;
         if (fvf & D3DFVF_NORMAL) cb->flags |= 0x08;
+        if (fvf & D3DFVF_NV2A_QR) cb->flags |= D3DFVF_NV2A_QR;
         if (rs && rs[D3DRS_LIGHTING]) cb->flags |= 0x10;
 
         /* Fog parameters */

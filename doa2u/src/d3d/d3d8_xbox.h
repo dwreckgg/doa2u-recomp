@@ -450,6 +450,8 @@ typedef enum D3DCLEAR_FLAGS {
 #define D3DFVF_TEX4             0x400
 #define D3DFVF_TEXCOUNT_MASK    0xF00
 #define D3DFVF_TEXCOUNT_SHIFT   8
+/* Port-private: after the texcoords, float4 q and float4 r (one per stage) for the NV2A texture shader. */
+#define D3DFVF_NV2A_QR          0x8000
 
 /* ================================================================
  * Structures

@@ -1391,14 +1391,23 @@ static uint32_t nv_light_vertex(const float pos[4], const float nrm[3],
  * nv_build_array_vertex leaves them here while s_tc_want is set. */
 static int      s_tc_want;
 static float    s_tc_out[4][2];
+static float    s_tq_out[4], s_tr_out[4];   /* per stage q and r */
 static uint32_t s_spec_out;
+
+/* EYE_LINEAR texgen on S or T with the texture matrix on (TCI_CAMERASPACEPOSITION
+ * projected into a render target: the Safari heat haze samples its refraction so). */
+static int nv_stage_eye_projective(int t)
+{
+    const uint32_t *g = &g_pg_reg[(0x3C0 >> 2) + t * 4];
+    return (g[0] == 0x2400u || g[1] == 0x2400u) && g_pg_reg[(0x420 >> 2) + t];
+}
 
 static void nv_build_array_vertex(uint32_t index, OutputVertex *v,
                                   const NvBatchCtx *ctx)
 {
     float pos[4], tex[4], col[4], nrm[4];
     uint32_t colour = 0xFFFFFFFFu;
-    const float *tg_mv = NULL;
+    const float *tg_mv = NULL, *eye_mv = NULL;
 
     memset(v, 0, sizeof(*v));
     v->color = 0xFFFFFFFFu;
@@ -1473,6 +1482,8 @@ static void nv_build_array_vertex(uint32_t index, OutputVertex *v,
                 for (t = 0; t < 4; t++) {
                     s_tc_out[t][0] = out[NV2A_VP_OUT_T0 + t][0];
                     s_tc_out[t][1] = out[NV2A_VP_OUT_T0 + t][1];
+                    s_tr_out[t] = out[NV2A_VP_OUT_T0 + t][2];
+                    s_tq_out[t] = 1.0f;
                 }
                 s_spec_out = nv_pack_color(out[NV2A_VP_OUT_D1]);
             }
@@ -1491,7 +1502,7 @@ static void nv_build_array_vertex(uint32_t index, OutputVertex *v,
             mv = s_identity_mv;                /* pos/nrm are now eye space */
         }
         nv_transform_position(pos, v);
-        tg_mv = mv;
+        tg_mv = eye_mv = mv;
         if (!has_nrm && s_tc_want && !nv_fetch_attr(2, index, nrm, NULL)) tg_mv = NULL;
         /* Fixed-function lighting: only when the guest enabled it, has a
          * light on, and supplies normals; otherwise diffuse stays white as
@@ -1521,10 +1532,28 @@ static void nv_build_array_vertex(uint32_t index, OutputVertex *v,
     if (s_tc_want) {
         int t;
         for (t = 0; t < 4; t++) {
-            tex[0] = tex[1] = 0.0f;
+            tex[0] = tex[1] = tex[2] = 0.0f; tex[3] = 1.0f;
             nv_fetch_attr(9 + t, index, tex, NULL);
+            if (eye_mv && nv_stage_eye_projective(t)) {
+                /* eye position through the texgen planes, then the texture matrix */
+                const uint32_t *M = &g_pg_reg[(0x6C0 + 0x40 * t) >> 2];
+                float E[4], C[4]; int k, c;
+                for (k = 0; k < 3; k++)
+                    E[k] = pos[0] * eye_mv[k * 4] + pos[1] * eye_mv[k * 4 + 1] + pos[2] * eye_mv[k * 4 + 2] + eye_mv[k * 4 + 3];
+                E[3] = 1.0f;
+                for (c = 0; c < 4; c++) {
+                    const uint32_t *P = &g_pg_reg[(0x840 + 0x40 * t + 0x10 * c) >> 2];
+                    if (g_pg_reg[(0x3C0 >> 2) + t * 4 + c] == 0x2400u)
+                        tex[c] = u2f(P[0]) * E[0] + u2f(P[1]) * E[1] + u2f(P[2]) * E[2] + u2f(P[3]) * E[3];
+                }
+                for (k = 0; k < 4; k++)
+                    C[k] = u2f(M[k * 4]) * tex[0] + u2f(M[k * 4 + 1]) * tex[1] + u2f(M[k * 4 + 2]) * tex[2] + u2f(M[k * 4 + 3]) * tex[3];
+                memcpy(tex, C, sizeof C);
+            } else tex[3] = 1.0f;
             s_tc_out[t][0] = tex[0];
             s_tc_out[t][1] = tex[1];
+            s_tr_out[t] = tex[2];
+            s_tq_out[t] = tex[3];
             /* REFLECTION_MAP texgen, then the texture matrix (cxbx
              * TCI_CAMERASPACEREFLECTIONVECTOR): the lab vat glass reflection. */
             if (tg_mv && g_pg_reg[(0x3C0 >> 2) + t * 4] == 0x8512u) {
@@ -2742,6 +2771,7 @@ static int nv_attr_enabled(int slot)
     return ((fmt >> 4) & 0xF) != 0 && base != 0 && base < 0x08000000u;
 }
 
+
 /* 1 = drawn (or legitimately dropped) on the GPU, 0 = use the CPU path. */
 static int nv_gpu_ff_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int prim, int is_quads)
 {
@@ -2896,25 +2926,30 @@ static int nv_gpu_ff_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int pr
  * and a pixel shader built from the raw combiner words (d3d8_Nv2aPS_Arm). */
 extern int d3d8_HasOffscreenTexture(uint32_t key);
 extern int d3d8_BindOffscreenTexture(uint32_t key, UINT stage);
+extern int d3d8_OffscreenTextureSize(uint32_t key, UINT *w, UINT *h);
 typedef struct {
     float    x, y, z, rhw;
     uint32_t d0, d1;
     float    tc[4][2];
+    float    q[4], r[4];     /* per stage: projective q (1 = none), third coordinate */
 } NvTsVertex;
-#define NV_TS_NF 20   /* clip-space floats per vertex: XYZW, 2 colours, 4 texcoords */
+#define NV_TS_NF 28   /* clip-space floats per vertex: XYZW, 2 colours, 4 texcoords, q, r */
 
 static int nv_uses_texshader(void)
 {
     uint32_t sp = g_pg_reg[0x1E70 >> 2];
     int i;
     for (i = 1; i < 4; i++) if (((sp >> (5 * i)) & 31) == 6) return 1;
+    /* projective eye-space coordinates need the per-pixel q divide */
+    for (i = 0; i < 4; i++)
+        if (((sp >> (5 * i)) & 31) == 1 && g_pg.tex[i].enabled && nv_stage_eye_projective(i)) return 1;
     /* 2D stage 1 read by a later combiner stage (the lab vat glass reflection):
      * the fixed-function path only does stage 0. */
     if (sp == 0x21) {
         int n = (int)(g_pg_reg[0x1E60 >> 2] & 0xFF), b;
         for (i = 1; i < n && i < 8; i++)
-            for (b = 0; b < 32; b += 8)
-                if (((g_pg_reg[(0x0AC0 >> 2) + i] >> b) & 0xF) == 9) return 1;
+            for (b = 0; b < 32; b += 8)   /* colour or alpha input (the Safari pond reflection's mask is t1.a) */
+                if (((g_pg_reg[(0x0AC0 >> 2) + i] >> b) & 0xF) == 9 || ((g_pg_reg[(0x0260 >> 2) + i] >> b) & 0xF) == 9) return 1;
     }
     return 0;
 }
@@ -2928,6 +2963,7 @@ static void nv_ts_to_clip(const NvTsVertex *v, float *f)
         f[4 + k] = (float)((v->d0 >> (8 * k)) & 255);
         f[8 + k] = (float)((v->d1 >> (8 * k)) & 255);
         f[12 + 2 * k] = v->tc[k][0]; f[13 + 2 * k] = v->tc[k][1];
+        f[20 + k] = v->q[k]; f[24 + k] = v->r[k];
     }
 }
 
@@ -2942,6 +2978,7 @@ static void nv_ts_from_clip(const float *f, NvTsVertex *v)
         a = a < 0 ? 0 : a > 255 ? 255 : a; b = b < 0 ? 0 : b > 255 ? 255 : b;
         v->d0 |= (uint32_t)a << (8 * k); v->d1 |= (uint32_t)b << (8 * k);
         v->tc[k][0] = f[12 + 2 * k]; v->tc[k][1] = f[13 + 2 * k];
+        v->q[k] = f[20 + k]; v->r[k] = f[24 + k];
     }
 }
 
@@ -2985,6 +3022,9 @@ static void nv_ts_unpack_color(uint32_t c, float *o)
     o[2] = (float)(c & 255) / 255.0f;         o[3] = (float)(c >> 24) / 255.0f;
 }
 
+/* texm3x2tex: DOTPRODUCT at stage 1, DOT_ST at stage 2, stage 3 off (Safari pond ripples). */
+static int nv_ts_is_dot_st(uint32_t sp) { return (sp & 0xFFFE0u) == ((9u << 10) | (17u << 5)); }
+
 /* Shader key and constants from the raw pushbuffer words. */
 static void nv_ts_key_consts(Nv2aPSKey *key, Nv2aPSConsts *cb)
 {
@@ -3002,6 +3042,7 @@ static void nv_ts_key_consts(Nv2aPSKey *key, Nv2aPSConsts *cb)
     key->final1 = g_pg_reg[0x028C >> 2];
     key->alpha_test = g_pg.alpha_test ? 1u : 0u;
     key->alpha_func = key->alpha_test ? g_pg.alpha_func : 0u;
+    if (nv_ts_is_dot_st(key->shader_prog)) key->dot_map = g_pg_reg[0x1E74 >> 2];
     memset(cb, 0, sizeof *cb);
     for (i = 0; i < 8; i++) {
         nv_ts_unpack_color(g_pg_reg[(0x0A60 >> 2) + ((cc & 0x1000) ? i : 0)], cb->c0[i]);
@@ -3013,6 +3054,7 @@ static void nv_ts_key_consts(Nv2aPSKey *key, Nv2aPSConsts *cb)
         for (k = 0; k < 4; k++) cb->bump[st][k] = u2f(g_pg_reg[((0x1B28 + 0x40 * st) >> 2) + k]);
     cb->alpha_ref = (float)(g_pg.alpha_ref & 0xFF);
 }
+
 
 /* Render state, every stage's texture, the draw, then stages 1-3 unbound again. */
 static void nv_ts_draw(IDirect3DDevice8 *dev, uint32_t shader_prog, const NvTsVertex *v, uint32_t n, int inline_draw)
@@ -3051,7 +3093,7 @@ static void nv_ts_draw(IDirect3DDevice8 *dev, uint32_t shader_prog, const NvTsVe
     {   DWORD prev_vs = 0;
         int clipped = nv_apply_window_clip();
         HRESULT got = dev->lpVtbl->GetVertexShader(dev, &prev_vs);
-        dev->lpVtbl->SetVertexShader(dev, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX4);
+        dev->lpVtbl->SetVertexShader(dev, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX4 | D3DFVF_NV2A_QR);
         dev->lpVtbl->BeginScene(dev);
         dev->lpVtbl->DrawPrimitiveUP(dev, D3DPT_TRIANGLELIST, n / 3, v, sizeof(NvTsVertex));
         if (clipped) { extern void d3d8_ResetScissorRect(void); d3d8_ResetScissorRect(); }
@@ -3071,12 +3113,23 @@ static int nv_submit_texshader(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int
     uint32_t n = g_pg.idx_count, out_n, i, ntri, cn = 0;
     Nv2aPSKey key;
     Nv2aPSConsts cb;
+    float rs[4], rt[4];
 
     if (!nv_uses_texshader()) return 0;
     if (prim != D3DPT_TRIANGLELIST && prim != D3DPT_TRIANGLESTRIP && prim != D3DPT_TRIANGLEFAN) return 0;
 
     nv_ts_key_consts(&key, &cb);
     if (!d3d8_Nv2aPS_Arm(&key, &cb)) return 0;
+    {   int st;
+        for (st = 0; st < 4; st++) {
+            uint32_t cf = (g_pg.tex[st].format >> 8) & 0x7F;
+            UINT hw, hh;
+            rs[st] = rt[st] = 1.0f;
+            if (!nv_stage_eye_projective(st) || cf < 0x10 || d3d8_format_is_swizzled(cf) || cf == 0x0C || cf == 0x0E || cf == 0x0F) continue;
+            if (d3d8_OffscreenTextureSize(g_pg.tex[st].offset, &hw, &hh) && hw < 512 && hh < 512) { rs[st] = 1.0f / hw; rt[st] = 1.0f / hh; }
+            else if (g_pg.tex[st].image_rect) { rs[st] = 1.0f / (float)(g_pg.tex[st].image_rect >> 16); rt[st] = 1.0f / (float)(g_pg.tex[st].image_rect & 0xFFFF); }
+        }
+    }
 
     /* Vertices, quads expanded to lists. */
     out_n = is_quads ? (n / 4) * 6 : n;
@@ -3091,6 +3144,10 @@ static int nv_submit_texshader(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int
         tv.x = ov.x; tv.y = ov.y; tv.z = ov.z; tv.rhw = ov.rhw;
         tv.d0 = ov.color; tv.d1 = s_spec_out;
         memcpy(tv.tc, s_tc_out, sizeof tv.tc);
+        memcpy(tv.q, s_tq_out, sizeof tv.q); memcpy(tv.r, s_tr_out, sizeof tv.r);
+        {   int st;   /* a projected linear target is addressed in texels */
+            for (st = 0; st < 4; st++) if (rs[st] != 1.0f || rt[st] != 1.0f) { tv.tc[st][0] *= rs[st]; tv.tc[st][1] *= rt[st]; }
+        }
         if (!(tv.x == tv.x) || !(tv.y == tv.y) || !(tv.rhw == tv.rhw)) { s_tc_want = 0; d3d8_Nv2aPS_Disarm(); return 1; }
         if (is_quads) {
             uint32_t q = (i / 4) * 6, c = i & 3;
@@ -3187,9 +3244,19 @@ static int nv_submit_inline_combiners(IDirect3DDevice8 *dev, const uint32_t *src
     Nv2aPSConsts cb;
     int is_quads = (g_pg.draw_mode == 8);
     int prim = is_quads ? D3DPT_TRIANGLELIST : g_pg.d3d_prim_type;
+    int dot_st = nv_ts_is_dot_st(g_pg_reg[0x1E70 >> 2]);
+    float dsx = 1.0f, dsy = 1.0f;
 
     if (prim != D3DPT_TRIANGLELIST && prim != D3DPT_TRIANGLESTRIP && prim != D3DPT_TRIANGLEFAN) return 0;
     if (nv_inline_slot_offsets(off) != stride || off[0] != 0) return 0;
+    if (dot_st) {
+        /* The dot products land in texels of a linear stage-2 texture (the 720x480 frame). */
+        uint32_t cf = (g_pg.tex[2].format >> 8) & 0x7F;
+        if (cf >= 0x10 && !d3d8_format_is_swizzled(cf) && cf != 0x0C && cf != 0x0E && cf != 0x0F) {
+            float w = (float)(g_pg.tex[2].image_rect >> 16), h = (float)(g_pg.tex[2].image_rect & 0xFFFF);
+            dsx = 1.0f / (w < 16.0f ? 720.0f : w); dsy = 1.0f / (h < 16.0f ? 480.0f : h);
+        }
+    }
 
     /* Rect (linear) targets are addressed in texels when the coordinates say so,
      * the same test the single-stage path uses; the host copy is sampled 0..1. */
@@ -3198,7 +3265,7 @@ static int nv_submit_inline_combiners(IDirect3DDevice8 *dev, const uint32_t *src
         int rect = cf >= 0x10 && !d3d8_format_is_swizzled(cf) && cf != 0x0C && cf != 0x0E && cf != 0x0F;
         float mu = 0.0f, mv = 0.0f;
         sw[st] = sh[st] = 1.0f;
-        if (!rect || off[9 + st] < 0) continue;
+        if (!rect || off[9 + st] < 0 || (dot_st && st > 0)) continue;
         for (i = 0; i < num_verts; i++) {
             float u = u2f(src[i * stride + so]), v = u2f(src[i * stride + so + 1]);
             if (u > mu) mu = u;
@@ -3257,10 +3324,16 @@ static int nv_submit_inline_combiners(IDirect3DDevice8 *dev, const uint32_t *src
                 d->tc[st][0] = (so >= 0) ? u2f(v[so]) / sw[st] : 0.0f;
                 d->tc[st][1] = (so >= 0 && ((g_pg.attr_fmt[9 + st] >> 4) & 0xF) >= 2) ? u2f(v[so + 1]) / sh[st] : 0.0f;
             }
+            for (st = 0; st < 4; st++) {
+                int so = off[9 + st];
+                d->q[st] = 1.0f;
+                d->r[st] = (so >= 0 && ((g_pg.attr_fmt[9 + st] >> 4) & 0xF) >= 3) ? u2f(v[so + 2]) : 0.0f;
+            }
         }
     }
     if (n < 3) return 0;
     nv_ts_key_consts(&key, &cb);
+    cb.dot_st_scale[0] = dsx; cb.dot_st_scale[1] = dsy;
     if (!d3d8_Nv2aPS_Arm(&key, &cb)) return 0;
     nv_ts_draw(dev, key.shader_prog, s_t, n, 1);
     return 1;
