@@ -2572,7 +2572,7 @@ static uint32_t nv_xbox_texop(uint32_t x)
  * NV2A point rule (xemu vsh-ff.c):
  *   d = |eye-space position|
  *   t = 1/sqrt(P0 + P1 d + P2 d^2) + P6
- *   s = clamp(t P3 + P7, min(P7, 63.875), min(P3 + P7, 63.875))
+ *   s = clamp(t P3 + P7, min(P7, 63.875), 63.875)
  * or SET_POINT_SIZE / 8 when the params are off. Sizes are in guest
  * render-target pixels; nv_fit_to_backbuffer scales the corners with
  * everything else. The hardware feeds the sprite's 0..1 coordinates to
@@ -2595,7 +2595,7 @@ static int nv_point_quad(const OutputVertex *v, const float *pos, OutputVertex *
         q = pp[0] + pp[1] * d + pp[2] * d2;
         t = (q > 0.0f) ? 1.0f / sqrtf(q) + pp[6] : 1e9f;
         lo = (pp[7] < 63.875f) ? pp[7] : 63.875f;
-        hi = (pp[3] + pp[7] < 63.875f) ? pp[3] + pp[7] : 63.875f;
+        hi = 63.875f;
         s = t * pp[3] + pp[7];
         if (!(s >= lo)) s = lo;
         if (s > hi) s = hi;
@@ -2659,11 +2659,21 @@ static void nv_apply_point_state(IDirect3DDevice8 *dev, const OutputVertex *out,
  * into a sprite quad with the same size rule and stage-3 texture binding.
  * Returns 0 (caller falls through to the 2D path) when the draw is not a
  * fixed-function 3D one. */
+static int nv_submit_point_combiners(IDirect3DDevice8 *dev, OutputVertex *out, uint32_t n, int inline_draw);
+static uint32_t nv_inline_slot_offsets(int off[16]);
 static int submit_inline_points(IDirect3DDevice8 *dev, const uint32_t *src, uint32_t num_verts,
                                 uint32_t stride, int lay_pos, int lay_col)
 {
     OutputVertex *out;
     uint32_t i, o = 0;
+    if (g_pg.draw_mode == 1 && ((g_pg.attr_fmt[0] >> 4) & 0xF) == 3 && (g_pg.attr_fmt[0] & 0xF) == 2) {
+        /* Unpack by the attribute formats (snow inline frames). */
+        int off[16];
+        uint32_t adw = nv_inline_slot_offsets(off);
+        if (adw && off[0] == 0 && (g_pg.inline_count % adw) == 0) {
+            stride = adw; num_verts = g_pg.inline_count / adw; lay_pos = 3; lay_col = off[3];
+        }
+    }
     if (g_pg.draw_mode != 1 || lay_pos < 3 || (g_pg.xform_mode & 3) == 2 || !nv_composite_usable())
         return 0;
     out = nv_scratch_verts(0, num_verts * 6);
@@ -2680,7 +2690,7 @@ static int submit_inline_points(IDirect3DDevice8 *dev, const uint32_t *src, uint
     }
     g_nv_draw_has_uv = 1;
     g_nv_draw_inline = 0;
-    if (o == 0) { g_pg.gtss_valid = 0; g_pg.tss3_valid = 0; g_pg.tss1_valid = 0; g_pg.tss0_alpha_valid = 0; return 1; }
+    if (o == 0 || nv_submit_point_combiners(dev, out, o, 0)) { g_pg.gtss_valid = 0; g_pg.tss3_valid = 0; g_pg.tss1_valid = 0; g_pg.tss0_alpha_valid = 0; return 1; }
     nv_apply_point_state(dev, out, o);
     g_pg.gtss_valid = 0;
     g_pg.tss3_valid = 0;
@@ -2698,6 +2708,60 @@ static int submit_inline_points(IDirect3DDevice8 *dev, const uint32_t *src, uint
     }
     g_pg.stats.draw_calls++;
     g_pg.stats.vertices_submitted += num_verts;
+    return 1;
+}
+
+/* Inline 3D lines (firework trails), transformed like the points above. */
+static int submit_inline_lines(IDirect3DDevice8 *dev, const uint32_t *src, uint32_t num_verts, uint32_t stride)
+{
+    OutputVertex *tv, *out;
+    int off[16];
+    uint32_t i, o = 0, nseg;
+    int mode = (int)g_pg.draw_mode;
+    if (mode < 2 || mode > 4 || ((g_pg.attr_fmt[0] >> 4) & 0xF) != 3 || (g_pg.attr_fmt[0] & 0xF) != 2 ||
+        (g_pg.xform_mode & 3) == 2 || !nv_composite_usable())
+        return 0;
+    stride = nv_inline_slot_offsets(off);
+    if (!stride || off[0] != 0 || (g_pg.inline_count % stride) != 0) return 0;
+    num_verts = g_pg.inline_count / stride;
+    if (num_verts < 2) return 1;
+    tv = nv_scratch_verts(1, num_verts);
+    out = nv_scratch_verts(0, num_verts * 2 + 2);
+    if (!tv || !out) return 0;
+    for (i = 0; i < num_verts; i++) {
+        const uint32_t *p = src + i * stride;
+        float pos[4];
+        pos[0] = u2f(p[0]); pos[1] = u2f(p[1]); pos[2] = u2f(p[2]); pos[3] = 1.0f;
+        memset(&tv[i], 0, sizeof tv[i]);
+        tv[i].rhw = 1.0f;
+        tv[i].color = (off[3] >= 0) ? p[off[3]] : 0xFFFFFFFFu;
+        nv_transform_position(pos, &tv[i]);
+    }
+    nseg = (mode == 2) ? num_verts / 2 : (mode == 3) ? num_verts : num_verts - 1;
+    for (i = 0; i < nseg; i++) {
+        const OutputVertex *a = &tv[(mode == 2) ? i * 2 : i], *b = &tv[(mode == 2) ? i * 2 + 1 : (i + 1) % num_verts];
+        if (!(a->rhw > 1e-6f) || !(b->rhw > 1e-6f) || !(a->z >= 0.0f) || !(b->z >= 0.0f) || a->z > 1.0f || b->z > 1.0f ||
+            !(a->x == a->x) || !(a->y == a->y) || !(b->x == b->x) || !(b->y == b->y)) continue;
+        out[o++] = *a; out[o++] = *b;
+    }
+    g_nv_draw_has_uv = 1;
+    g_nv_draw_inline = 0;
+    if (o) {
+        nv_apply_draw_state_cpu(dev, out, o);
+        nv_fit_to_backbuffer(out, o, 0);
+        {   DWORD prev_vs = 0;
+            int clipped = nv_apply_window_clip();
+            HRESULT got = dev->lpVtbl->GetVertexShader(dev, &prev_vs);
+            dev->lpVtbl->SetVertexShader(dev, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+            dev->lpVtbl->BeginScene(dev);
+            dev->lpVtbl->DrawPrimitiveUP(dev, D3DPT_LINELIST, o / 2, out, sizeof(OutputVertex));
+            if (clipped) { extern void d3d8_ResetScissorRect(void); d3d8_ResetScissorRect(); }
+            if (got == 0) dev->lpVtbl->SetVertexShader(dev, prev_vs);
+        }
+        g_pg.stats.draw_calls++;
+        g_pg.stats.vertices_submitted += num_verts;
+    }
+    g_pg.gtss_valid = 0; g_pg.tss3_valid = 0; g_pg.tss1_valid = 0; g_pg.tss0_alpha_valid = 0;
     return 1;
 }
 
@@ -3339,6 +3403,31 @@ static int nv_submit_inline_combiners(IDirect3DDevice8 *dev, const uint32_t *src
     return 1;
 }
 
+/* Point-sprite quads through the game's combiners. */
+static int nv_submit_point_combiners(IDirect3DDevice8 *dev, OutputVertex *out, uint32_t n, int inline_draw)
+{
+    static NvTsVertex *s_t;
+    static uint32_t s_cap;
+    Nv2aPSKey key;
+    Nv2aPSConsts cb;
+    uint32_t i;
+    if (!(g_pg.point_smooth && g_pg.tex[3].offset && ((g_pg_reg[0x1E70 >> 2] >> 15) & 31))) return 0;
+    if (s_cap < n) { void *p = realloc(s_t, n * sizeof *s_t); if (!p) return 0; s_t = p; s_cap = n; }
+    nv_ts_key_consts(&key, &cb);
+    if (!d3d8_Nv2aPS_Arm(&key, &cb)) return 0;
+    nv_fit_to_backbuffer(out, n, 0);
+    for (i = 0; i < n; i++) {
+        NvTsVertex *d = &s_t[i];
+        memset(d, 0, sizeof *d);
+        d->x = out[i].x; d->y = out[i].y; d->z = out[i].z; d->rhw = out[i].rhw;
+        d->d0 = out[i].color;
+        d->tc[3][0] = out[i].u; d->tc[3][1] = out[i].v;
+        d->q[0] = d->q[1] = d->q[2] = d->q[3] = 1.0f;
+    }
+    nv_ts_draw(dev, key.shader_prog, s_t, n, inline_draw);
+    return 1;
+}
+
 static void submit_array_draw(void)
 {
     nv_sync_render_target();
@@ -3388,7 +3477,7 @@ static void submit_array_draw(void)
          * position, sized by the NV2A point rule (xemu vsh-ff.c):
          *   d = |eye-space position|
          *   t = 1/sqrt(P0 + P1 d + P2 d^2) + P6
-         *   s = clamp(t P3 + P7, min(P7, 63.875), min(P3 + P7, 63.875))
+         *   s = clamp(t P3 + P7, min(P7, 63.875), 63.875)
          * or SET_POINT_SIZE / 8 when the params are off. Sizes are in guest
          * render-target pixels; nv_fit_to_backbuffer scales the corners with
          * everything else. The hardware feeds the sprite's 0..1 coordinates
@@ -3411,6 +3500,10 @@ static void submit_array_draw(void)
         }
         if (o == 0) { g_pg.idx_count = 0; g_pg.gtss_valid = 0; g_pg.tss3_valid = 0; return; }
         out_n = o; prim = D3DPT_TRIANGLELIST; prim_count = o / 3;
+        if (nv_submit_point_combiners(dev, out, o, 0)) {
+            g_pg.idx_count = 0; g_pg.gtss_valid = 0; g_pg.tss3_valid = 0; g_pg.tss1_valid = 0; g_pg.tss0_alpha_valid = 0;
+            return;
+        }
     } else {
         out = nv_scratch_verts(0, out_n);
         if (!out) { g_pg.idx_count = 0; g_pg.idx_dropped = 0; g_pg.gtss_valid = 0; g_pg.tss3_valid = 0; return; }
@@ -3712,6 +3805,8 @@ static void submit_draw(void)
 
     {   IDirect3DDevice8 *pdev = xbox_GetD3DDevice();
         if (pdev && submit_inline_points(pdev, src, num_verts, stride, lay_pos, lay_col))
+            return;
+        if (pdev && submit_inline_lines(pdev, src, num_verts, stride))
             return;
     }
     if (nv_inline_wants_combiners()) {
