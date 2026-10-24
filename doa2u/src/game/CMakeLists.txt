@@ -27,6 +27,7 @@ set(GAME_SOURCES
     ${CMAKE_SOURCE_DIR}/src/ui/video_settings.c
     ${CMAKE_SOURCE_DIR}/src/ui/log_settings.c
     ${CMAKE_SOURCE_DIR}/src/ui/profile_settings.c
+    ${CMAKE_SOURCE_DIR}/src/ui/unlockables.c
     recomp/recomp_manual.c
     burnout_compat_stubs.c   # inert stubs for burnout-only symbols the nv2a srcs need
     assets/doa2u.rc
@@ -93,3 +94,20 @@ set_target_properties(doa2u PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/release"
     PDB_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/debug"
 )
+
+# Host-side test for the unlockables pokes: fake Xbox memory, no game needed.
+# Build with: cmake --build build --config Release --target unlockables_test
+add_executable(unlockables_test
+    ${CMAKE_SOURCE_DIR}/src/ui/unlockables.c
+    ${CMAKE_SOURCE_DIR}/tests/unlockables_test.c
+)
+target_include_directories(unlockables_test PRIVATE ${CMAKE_SOURCE_DIR}/src/ui)
+set_target_properties(unlockables_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/tests"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/tests")
+if(MSVC)
+    target_compile_options(unlockables_test PRIVATE /W3 /WX-)
+    target_compile_definitions(unlockables_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    set_property(TARGET unlockables_test PROPERTY MSVC_RUNTIME_CHECKS "")
+endif()
