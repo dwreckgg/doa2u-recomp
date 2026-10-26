@@ -78,7 +78,7 @@ if(MSVC)
     target_link_options(doa2u PRIVATE
         /DYNAMICBASE:NO
         /FIXED:NO
-        /MAP
+        $<$<CONFIG:Debug>:/MAP>
         $<$<CONFIG:Debug>:/DEBUG>
         $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS>
         $<$<CONFIG:Release>:/ENTRY:mainCRTStartup>

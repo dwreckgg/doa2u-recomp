@@ -6,6 +6,7 @@ set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
 add_library(doa2u_ui STATIC
     doa2u_ui.cpp
     doa2u_setup.cpp
+    ${CMAKE_SOURCE_DIR}/third_party/miniz/miniz.c
     ${IMGUI_DIR}/imgui.cpp
     ${IMGUI_DIR}/imgui_draw.cpp
     ${IMGUI_DIR}/imgui_tables.cpp
@@ -17,6 +18,7 @@ add_library(doa2u_ui STATIC
 target_include_directories(doa2u_ui PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${IMGUI_DIR}
+    ${CMAKE_SOURCE_DIR}/third_party/miniz
 )
 
 target_link_libraries(doa2u_ui PRIVATE
@@ -28,7 +30,14 @@ target_link_libraries(doa2u_ui PRIVATE
     dwmapi
     comdlg32
     shell32
+    winhttp
 )
+
+# This build's version, compared against the GitHub release tags
+# (v<major>.<minor>.<CI run number>) by Check for Updates.
+set(DOA2U_BUILD_NUMBER 0 CACHE STRING "CI run number")
+target_compile_definitions(doa2u_ui PRIVATE
+    DOA2U_VERSION_STRING="${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${DOA2U_BUILD_NUMBER}")
 
 # ImGui is third-party: build it clean but do not hold it to our warning level.
 if(MSVC)
