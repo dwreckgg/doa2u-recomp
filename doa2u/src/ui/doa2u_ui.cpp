@@ -44,6 +44,17 @@ char g_status[128] = { 0 };
 
 void SetStatus(const char *s) { _snprintf_s(g_status, sizeof(g_status), _TRUNCATE, "%s", s); }
 
+/* Re-run WM_SETCURSOR now so the cursor shows/hides without waiting for a mouse move. */
+void RefreshCursor()
+{
+    HWND hwnd = d3d8_GetHWND();
+    POINT pt;
+    RECT rc;
+    if (!hwnd || !GetCursorPos(&pt) || !ScreenToClient(hwnd, &pt) || !GetClientRect(hwnd, &rc)) return;
+    if (PtInRect(&rc, pt))
+        SendMessageA(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+}
+
 /* "Saved <file>" / "Could not write <file>", naming the file without its folder. */
 void SetSaveStatus(int ok, const char *path)
 {
@@ -272,6 +283,19 @@ void DrawGeneralSection()
     bool on = doa2u_log_enabled() != 0;
     if (ImGui::Checkbox("Write log files", &on))
         doa2u_log_set_enabled(on ? 1 : 0);
+
+    /* Quit centred above the bottom edge. */
+    const float gap = 24.0f;
+    float bottom = ImGui::GetCursorPosY() + ImGui::GetContentRegionAvail().y -
+                   ImGui::GetFrameHeight() - gap;
+    if (bottom > ImGui::GetCursorPosY()) ImGui::SetCursorPosY(bottom);
+    float quit_w = ImGui::CalcTextSize("Quit Game").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - quit_w) * 0.5f);
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.70f, 0.12f, 0.12f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.18f, 0.18f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.55f, 0.08f, 0.08f, 1.0f));
+    if (ImGui::Button("Quit Game")) PostMessageA(d3d8_GetHWND(), WM_CLOSE, 0, 0);
+    ImGui::PopStyleColor(3);
 }
 
 /* ── Profile section ──────────────────────────────────────────────────────*/
@@ -300,9 +324,13 @@ void DrawProfileSection()
 void DrawMenu()
 {
     const ImGuiViewport *vp = ImGui::GetMainViewport();
+    /* Re-centre when the window is resized (window type change). */
+    static ImVec2 s_last_size;
+    bool resized = vp->WorkSize.x != s_last_size.x || vp->WorkSize.y != s_last_size.y;
+    s_last_size = vp->WorkSize;
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
                                    vp->WorkPos.y + vp->WorkSize.y * 0.5f),
-                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                            resized ? ImGuiCond_Always : ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(560, 460), ImGuiCond_Appearing);
 
     bool open = true;
@@ -333,6 +361,7 @@ void DrawMenu()
     if (!open) {
         g_visible = false;
         pad_mapping_set_menu_open(0);
+        RefreshCursor();
     }
 }
 
@@ -391,6 +420,7 @@ extern "C" void doa2u_ui_toggle(void)
     g_pending_vk = 0;
     /* Keyboard sources are suppressed while the menu owns the keyboard. */
     pad_mapping_set_menu_open(g_visible ? 1 : 0);
+    RefreshCursor();
 }
 
 extern "C" int doa2u_ui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -406,6 +436,12 @@ extern "C" int doa2u_ui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         } else {
             doa2u_ui_toggle();
         }
+        return 1;
+    }
+
+    /* No cursor over the game while the overlay is closed. */
+    if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT && !g_visible) {
+        SetCursor(NULL);
         return 1;
     }
 
