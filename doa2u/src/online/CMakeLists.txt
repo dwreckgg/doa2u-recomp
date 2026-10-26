@@ -5,6 +5,9 @@ add_library(doa2u_online STATIC
     netplay_format.c
     netplay_dump.c
     online_settings.c
+    netplay_diag.c
+    netplay_hook.c
+    doa2u_game.c
 )
 
 target_include_directories(doa2u_online

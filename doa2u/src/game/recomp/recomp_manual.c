@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include "../../kernel/perf.h"
+#include "../../online/netplay_hook.h"
 #pragma comment(lib, "winmm.lib")
 
 extern uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
@@ -737,6 +738,7 @@ void sub_002FBAE0(void)
  * Other device types (memory units, 0x3B83E0) keep the generated bodies. */
 #define XPP_TYPE_GAMEPAD  0x003B845Cu
 #define XPP_HANDLE_BASE   0x0AD00001u   /* fake but consistent nonzero handles */
+#define XPP_PAD_VA(p)     (0x00A94838u + 0x80u * (p))   /* pad structs, 4 x 0x80 (sub_000FA5D0) */
 
 static uint32_t s_xpp_prev_mask;   /* XGetDeviceChanges baseline (real XAPI PreviousConnected) */
 
@@ -753,7 +755,7 @@ void sub_003B9913(void)   /* XGetDevices(type) -> connected mask, stdcall ret 4 
     /* Real XAPI semantics (cxbx Xapi.cpp): reporting the connected set also
      * resets the change baseline, so XGetDeviceChanges does not re-report
      * these pads as insertions. */
-    s_xpp_prev_mask = xbox_InputHostMask();
+    s_xpp_prev_mask = netplay_hook_filter_pad_mask(xbox_InputHostMask());
     eax = s_xpp_prev_mask;
     esp += 8;
 }
@@ -767,14 +769,100 @@ void sub_003B9935(void)   /* XGetDeviceChanges(type, &ins, &rem), stdcall ret 12
     /* Both outputs are written on every call -- zero when nothing changed. */
     p_ins = MEM32(esp + 8);
     p_rem = MEM32(esp + 12);
-    cur = xbox_InputHostMask();
+    cur = netplay_hook_filter_pad_mask(xbox_InputHostMask());
     ins = cur & ~s_xpp_prev_mask;
     rem = s_xpp_prev_mask & ~cur;
+    {   /* Online play fixes the pads at ports 0 and 1 on both machines. A
+         * forced port the game has not opened yet (no handle at pad+0x78)
+         * is reported as an insertion whatever the baseline says. */
+        uint32_t forced = netplay_hook_forced_pads(), p;
+        for (p = 0; p < 4; p++)
+            if ((forced & (1u << p)) && MEM32(XPP_PAD_VA(p) + 0x78u) == 0) ins |= 1u << p;
+    }
     s_xpp_prev_mask = cur;
     if (p_ins) MEM32(p_ins) = ins;
     if (p_rem) MEM32(p_rem) = rem;
     eax = (ins | rem) ? 1u : 0u;
     esp += 16;
+}
+
+/* Online session start: the four pad structs into the same state on both
+ * machines. Layout from sub_000FA5D0 / sub_000FA6C0 / sub_000FA7B0: the
+ * capabilities blob at +0x00 (0x19 bytes), the XInputGetState slot at +0x19
+ * (packet, then XINPUT_GAMEPAD to +0x2E), the handle at +0x78; the per-pad
+ * aggregates at 0xA94A70..0xA94BC0 (zeroed at boot); 0xA94828 / 0xA9482C the
+ * insertion / removal words XGetDeviceChanges fills; 0xA94A68 the mask of
+ * pads polled this frame. */
+void doa2u_netplay_force_pads(uint32_t mask)
+{
+    uint32_t p, i;
+    for (p = 0; p < 4; p++) {
+        uint32_t pad = XPP_PAD_VA(p);
+        for (i = 0x00; i < 0x2F; i++) MEM8(pad + i) = 0;
+        if (mask & (1u << p)) {
+            MEM8(pad) = 1;                              /* XINPUT_DEVSUBTYPE_GC_GAMEPAD */
+            MEM32(pad + 0x78) = XPP_HANDLE_BASE + p;    /* XInputOpen's handle */
+        } else {
+            MEM32(pad + 0x78) = 0;
+        }
+    }
+    for (i = 0x00A94A70u; i < 0x00A94BC0u; i++) MEM8(i) = 0;
+    MEM32(0x00A94A68u) = mask;
+    MEM32(0x00A94828u) = 0;
+    MEM32(0x00A9482Cu) = 0;
+    s_xpp_prev_mask = mask;
+}
+
+/* The per-frame pad builder (sub_000FA760), called once a frame from
+ * sub_000FAC20 after the XInputGetState poll (sub_000FA6C0), and once at
+ * boot. Online play runs here: between the poll and the fold. */
+void sub_000FA760_gen(void);
+void sub_000FA760(void)
+{
+    netplay_frame_hook();
+    sub_000FA760_gen();
+}
+
+/* CRT rand() (sub_003352A4; seed at [_getptd() (sub_00338901)] + 0x14).
+ * Online sessions count every call, and worker fibers (file streaming,
+ * audio), which call rand() a host-timing dependent number of times, draw
+ * from their own streams so the game thread's seed only moves with
+ * gameplay. */
+static uint32_t s_wseed[64];
+void doa2u_worker_rand_seed(uint32_t seed)
+{
+    int i;
+    for (i = 0; i < 64; i++) s_wseed[i] = (seed ^ (uint32_t)(i * 0x9E3779B1u)) | 1u;
+}
+
+uint32_t doa2u_rand_seed_va(void)
+{
+    uint32_t sv[7] = { eax, ebx, ecx, edx, esi, edi, esp }, sv_seh = g_seh_ebp, ptd;
+    PUSH32(esp, 0);                                     /* dummy return */
+    sub_00338901();
+    ptd = eax;
+    eax = sv[0]; ebx = sv[1]; ecx = sv[2]; edx = sv[3]; esi = sv[4]; edi = sv[5]; esp = sv[6];
+    g_seh_ebp = sv_seh;
+    return ptd ? ptd + 0x14u : 0;
+}
+
+void sub_003352A4_gen(void);
+void sub_003352A4(void)
+{
+    extern int xbox_fiber_active(void), xbox_fiber_is_primary(void), xbox_fiber_is_coroutine(void);
+    extern int xbox_fiber_current(void);
+    netplay_hook_note_rand();
+    if (netplay_hook_session_active() && xbox_fiber_active() && !xbox_fiber_is_primary() &&
+        !xbox_fiber_is_coroutine()) {
+        int f = xbox_fiber_current();
+        uint32_t *w = &s_wseed[(f >= 0 && f < 64) ? f : 63];
+        if (!*w) *w = 0x12345u | (uint32_t)f;
+        *w = *w * 214013u + 2531011u;
+        eax = (*w >> 16) & 0x7FFFu;
+        esp += 4;                                       /* ret: cdecl, the caller's slot */
+        return;
+    }
+    sub_003352A4_gen();
 }
 
 void sub_003B9E12_gen(void);
@@ -817,6 +905,18 @@ void sub_003BA04C(void)   /* XInputGetState(handle, state), stdcall ret 8 */
     uint8_t raw[24] = {0};   /* XBOX_INPUT_STATE: packet, wButtons, 8 analog, 4 thumbs */
     if (port < 0) { sub_003BA04C_gen(); return; }
     if (xbox_InputGetState((DWORD)port, raw) != 0) {
+        /* A port online play holds open with no pad behind it (unplugged
+         * mid-match, or the lobby's second port) reads as a neutral pad, not
+         * as whatever its slot held last. */
+        if (netplay_hook_forced_pads() & (1u << port)) {
+            if (st) {
+                MEM32(st) = ++s_packet;
+                for (i = 0; i < 18; i++) MEM8(st + 4 + i) = 0;
+            }
+            eax = 0;
+            esp += 12;
+            return;
+        }
         eax = 0x48F;   /* ERROR_DEVICE_NOT_CONNECTED */
         esp += 12;
         return;
