@@ -2839,11 +2839,54 @@ static int nv_attr_enabled(int slot)
 }
 
 
+/* The per-draw vertex-shader constants both GPU paths share: clip matrix,
+ * model-view, lights, ambient + emission, and the colour-source flags. */
+static void nv_ff_constants(Nv2aFFConstants *cb, const NvBatchCtx *ctx, int lit, int has_color, int skinned)
+{
+    int k;
+    memset(cb, 0, sizeof *cb);
+    {
+        float zrange = (((g_pg.surface_fmt >> 4) & 0xF) == 1) ? 65535.0f : 16777215.0f;
+        float ox = g_pg.vp_offset[0], oy = g_pg.vp_offset[1];
+        unsigned sw, sh;
+        unsigned bw = d3d8_GetBackbufferWidth(), bh = d3d8_GetBackbufferHeight();
+        float sx = 1.0f, sy = 1.0f, kx, ky;
+        nv_surface_size(&sw, &sh);
+        if (!(ox >= 0.0f && oy >= 0.0f && sw && sh && ox < (float)sw && oy < (float)sh)) { ox = 0.0f; oy = 0.0f; }
+        if (sw && sh && bw && bh && !(sw == bw && sh == bh)) { sx = (float)bw / (float)sw; sy = (float)bh / (float)sh; }
+        kx = 2.0f * sx / (float)bw;
+        ky = 2.0f * sy / (float)bh;
+        for (k = 0; k < 4; k++) {
+            float r0 = g_pg.composite[0 * 4 + k], r1 = g_pg.composite[1 * 4 + k];
+            float r2 = g_pg.composite[2 * 4 + k], r3 = g_pg.composite[3 * 4 + k];
+            cb->clip[0][k] =  kx * r0 + (kx * ox - 1.0f) * r3;
+            cb->clip[1][k] = -ky * r1 + (1.0f - ky * oy) * r3;
+            cb->clip[2][k] =  r2 / zrange;
+            cb->clip[3][k] =  r3;
+        }
+    }
+    for (k = 0; k < 3; k++) { int j; for (j = 0; j < 4; j++) cb->mv[k][j] = (skinned ? s_identity_mv : g_mv)[k * 4 + j]; }
+    for (k = 0; k < 4; k++) {
+        uint32_t t = ctx->ltype[k];
+        if (!t) continue;
+        if (t == 1) { cb->light_dir[k][0] = ctx->dir_n[k][0]; cb->light_dir[k][1] = ctx->dir_n[k][1]; cb->light_dir[k][2] = ctx->dir_n[k][2]; cb->light_dir[k][3] = 1.0f; }
+        else        { cb->light_dir[k][0] = g_pg.light[k].pos[0]; cb->light_dir[k][1] = g_pg.light[k].pos[1]; cb->light_dir[k][2] = g_pg.light[k].pos[2]; cb->light_dir[k][3] = 2.0f; }
+        cb->light_amb[k][0] = g_pg.light[k].amb[0]; cb->light_amb[k][1] = g_pg.light[k].amb[1]; cb->light_amb[k][2] = g_pg.light[k].amb[2];
+        cb->light_dif[k][0] = g_pg.light[k].dif[0]; cb->light_dif[k][1] = g_pg.light[k].dif[1]; cb->light_dif[k][2] = g_pg.light[k].dif[2];
+        cb->light_att[k][0] = g_pg.light[k].att[0]; cb->light_att[k][1] = g_pg.light[k].att[1]; cb->light_att[k][2] = g_pg.light[k].att[2];
+        cb->light_att[k][3] = g_pg.light[k].range;
+    }
+    for (k = 0; k < 3; k++) cb->ambemis[k] = g_pg.scene_ambient[k] + g_pg.emission[k];
+    cb->ambemis[3] = g_pg.material_alpha;
+    cb->flags = (lit ? NV2AFF_FLAG_LIT : 0) | (ctx->ambient_only ? NV2AFF_FLAG_AMBIENT_ONLY : 0) |
+               (has_color ? NV2AFF_FLAG_HAS_COLOR : 0);
+}
+
 /* 1 = drawn (or legitimately dropped) on the GPU, 0 = use the CPU path. */
 static int nv_gpu_ff_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int prim, int is_quads)
 {
     uint32_t n = g_pg.idx_count, i, lo = 0, nv = 0, ni = 0, need_idx;
-    int has_color, has_uv, lit, all_zero = 1, k;
+    int has_color, has_uv, lit, all_zero = 1;
     Nv2aFFConstants cb;
     NvDrawSummary sum;
     NvPostOps post;
@@ -2931,42 +2974,7 @@ static int nv_gpu_ff_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int pr
     g_pg.tss0_alpha_valid = 0;
 
     /* Constants. */
-    memset(&cb, 0, sizeof cb);
-    {
-        float zrange = (((g_pg.surface_fmt >> 4) & 0xF) == 1) ? 65535.0f : 16777215.0f;
-        float ox = g_pg.vp_offset[0], oy = g_pg.vp_offset[1];
-        unsigned sw, sh;
-        unsigned bw = d3d8_GetBackbufferWidth(), bh = d3d8_GetBackbufferHeight();
-        float sx = 1.0f, sy = 1.0f, kx, ky;
-        nv_surface_size(&sw, &sh);
-        if (!(ox >= 0.0f && oy >= 0.0f && sw && sh && ox < (float)sw && oy < (float)sh)) { ox = 0.0f; oy = 0.0f; }
-        if (sw && sh && bw && bh && !(sw == bw && sh == bh)) { sx = (float)bw / (float)sw; sy = (float)bh / (float)sh; }
-        kx = 2.0f * sx / (float)bw;
-        ky = 2.0f * sy / (float)bh;
-        for (k = 0; k < 4; k++) {
-            float r0 = g_pg.composite[0 * 4 + k], r1 = g_pg.composite[1 * 4 + k];
-            float r2 = g_pg.composite[2 * 4 + k], r3 = g_pg.composite[3 * 4 + k];
-            cb.clip[0][k] =  kx * r0 + (kx * ox - 1.0f) * r3;
-            cb.clip[1][k] = -ky * r1 + (1.0f - ky * oy) * r3;
-            cb.clip[2][k] =  r2 / zrange;
-            cb.clip[3][k] =  r3;
-        }
-    }
-    for (k = 0; k < 3; k++) { int j; for (j = 0; j < 4; j++) cb.mv[k][j] = (skinned ? s_identity_mv : g_mv)[k * 4 + j]; }
-    for (k = 0; k < 4; k++) {
-        uint32_t t = ctx->ltype[k];
-        if (!t) continue;
-        if (t == 1) { cb.light_dir[k][0] = ctx->dir_n[k][0]; cb.light_dir[k][1] = ctx->dir_n[k][1]; cb.light_dir[k][2] = ctx->dir_n[k][2]; cb.light_dir[k][3] = 1.0f; }
-        else        { cb.light_dir[k][0] = g_pg.light[k].pos[0]; cb.light_dir[k][1] = g_pg.light[k].pos[1]; cb.light_dir[k][2] = g_pg.light[k].pos[2]; cb.light_dir[k][3] = 2.0f; }
-        cb.light_amb[k][0] = g_pg.light[k].amb[0]; cb.light_amb[k][1] = g_pg.light[k].amb[1]; cb.light_amb[k][2] = g_pg.light[k].amb[2];
-        cb.light_dif[k][0] = g_pg.light[k].dif[0]; cb.light_dif[k][1] = g_pg.light[k].dif[1]; cb.light_dif[k][2] = g_pg.light[k].dif[2];
-        cb.light_att[k][0] = g_pg.light[k].att[0]; cb.light_att[k][1] = g_pg.light[k].att[1]; cb.light_att[k][2] = g_pg.light[k].att[2];
-        cb.light_att[k][3] = g_pg.light[k].range;
-    }
-    for (k = 0; k < 3; k++) cb.ambemis[k] = g_pg.scene_ambient[k] + g_pg.emission[k];
-    cb.ambemis[3] = g_pg.material_alpha;
-    cb.flags = (lit ? NV2AFF_FLAG_LIT : 0) | (ctx->ambient_only ? NV2AFF_FLAG_AMBIENT_ONLY : 0) |
-               (has_color ? NV2AFF_FLAG_HAS_COLOR : 0);
+    nv_ff_constants(&cb, ctx, lit, has_color, skinned);
     if (post.fold) {
         uint32_t f = post.fold_factor;
         cb.flags |= NV2AFF_FLAG_FOLD;
@@ -3133,8 +3141,8 @@ static void nv_ts_key_consts(Nv2aPSKey *key, Nv2aPSConsts *cb)
 }
 
 
-/* Render state, every stage's texture, the draw, then stages 1-3 unbound again. */
-static void nv_ts_draw(IDirect3DDevice8 *dev, uint32_t shader_prog, const NvTsVertex *v, uint32_t n, int inline_draw)
+/* Render state and every stage's texture for a texture-shader draw. */
+static void nv_ts_bind(IDirect3DDevice8 *dev, uint32_t shader_prog, int inline_draw)
 {
     NvDrawSummary sum;
     NvPostOps post;
@@ -3167,6 +3175,22 @@ static void nv_ts_draw(IDirect3DDevice8 *dev, uint32_t shader_prog, const NvTsVe
         }
         nv_apply_tex_address(dev, st);
     }
+}
+
+/* After a texture-shader draw: shader disarmed, stages 1-3 unbound again. */
+static void nv_ts_done(IDirect3DDevice8 *dev, uint32_t n)
+{
+    int st;
+    d3d8_Nv2aPS_Disarm();
+    for (st = 1; st < 4; st++) dev->lpVtbl->SetTexture(dev, st, NULL);
+    g_pg.stats.draw_calls++;
+    g_pg.stats.vertices_submitted += n;
+}
+
+/* Render state, every stage's texture, the draw, then stages 1-3 unbound again. */
+static void nv_ts_draw(IDirect3DDevice8 *dev, uint32_t shader_prog, const NvTsVertex *v, uint32_t n, int inline_draw)
+{
+    nv_ts_bind(dev, shader_prog, inline_draw);
     {   DWORD prev_vs = 0;
         int clipped = nv_apply_window_clip();
         HRESULT got = dev->lpVtbl->GetVertexShader(dev, &prev_vs);
@@ -3176,18 +3200,122 @@ static void nv_ts_draw(IDirect3DDevice8 *dev, uint32_t shader_prog, const NvTsVe
         if (clipped) { extern void d3d8_ResetScissorRect(void); d3d8_ResetScissorRect(); }
         if (got == 0) dev->lpVtbl->SetVertexShader(dev, prev_vs);
     }
-    d3d8_Nv2aPS_Disarm();
-    for (st = 1; st < 4; st++) dev->lpVtbl->SetTexture(dev, st, NULL);
-    g_pg.stats.draw_calls++;
-    g_pg.stats.vertices_submitted += n;
+    nv_ts_done(dev, n);
+}
+
+/* Texture-shader array draws on the GPU: the VS does nv_build_array_vertex's
+ * transform, lighting, texgen and clip. 1 = drawn or dropped, 0 = use the CPU path. */
+static Nv2aTSVertex *s_tsv; static uint32_t s_tsv_cap;
+static int nv_gpu_ts_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int prim, int is_quads,
+                            uint32_t shader_prog, const float rs[4], const float rt[4])
+{
+    uint32_t n = g_pg.idx_count, i, lo = 0, nv = 0, ni = 0, need_idx;
+    int lit, has_color, nrm_ok, t, c;
+    int gen, skinned = nv_skin_count(&gen) != 0;
+    uint32_t spec_type = g_pg.attr_fmt[4] & 0xF;
+    Nv2aTSConstants cb;
+    static int s_flip = -1;
+    if (s_flip < 0) { const char *e = getenv("DOA2U_FLIPW"); s_flip = (e && *e == '1'); }
+
+    if (ctx->run_program || !g_pg.composite_seen || s_flip) return 0;
+    if (prim != D3DPT_TRIANGLELIST && prim != D3DPT_TRIANGLESTRIP && prim != D3DPT_TRIANGLEFAN) return 0;
+    for (i = 0; i < 16; i++) if (!isfinite(g_pg.composite[i])) return 0;
+    if (!nv_attr_enabled(0)) return 0;
+    nrm_ok    = nv_attr_enabled(2);
+    lit       = ctx->lit && nrm_ok;
+    has_color = nv_attr_enabled(3);
+    if (!nv_vreuse_begin(g_pg.idx, n, &lo)) return 0;
+
+    need_idx = is_quads ? (n / 4) * 6 : (prim == D3DPT_TRIANGLEFAN ? (n - 2) * 3 : n);
+    if (s_tsv_cap < n)       { void *b = realloc(s_tsv, n * sizeof *s_tsv); if (!b) return 0; s_tsv = b; s_tsv_cap = n; }
+    if (s_gi_cap < need_idx) { void *b = realloc(s_gi, need_idx * sizeof *s_gi); if (!b) return 0; s_gi = b; s_gi_cap = need_idx; }
+    if (s_gs_cap < n)        { void *b = realloc(s_gs, n * sizeof *s_gs); if (!b) return 0; s_gs = b; s_gs_cap = n; }
+
+    /* Pack each unique vertex once, raw as nv_build_array_vertex reads it. */
+    for (i = 0; i < n; i++) {
+        uint32_t idx = g_pg.idx[i], d = idx - lo;
+        Nv2aTSVertex *v;
+        float tmp[4];
+        uint32_t colour = 0xFFFFFFFFu, sc = 0;
+        if (s_vstamp[d] == s_vgen) { s_gs[i] = (uint16_t)s_vslot[d]; continue; }
+        if (nv >= 65535) return 0;
+        v = &s_tsv[nv];
+        if (!nv_fetch_attr(0, idx, v->pos, NULL)) return 0;
+        if (!isfinite(v->pos[0]) || !isfinite(v->pos[1]) || !isfinite(v->pos[2]) || !isfinite(v->pos[3])) {
+            d3d8_Nv2aPS_Disarm();               /* the CPU path drops such a batch too */
+            return 1;
+        }
+        v->nrm[0] = v->nrm[1] = v->nrm[2] = 0.0f;
+        if (nrm_ok) { if (!nv_fetch_attr(2, idx, tmp, NULL)) return 0; v->nrm[0] = tmp[0]; v->nrm[1] = tmp[1]; v->nrm[2] = tmp[2]; }
+        /* Skinning blends the normal only when lighting uses it, as on the CPU. */
+        if (skinned) nv_skin_blend(idx, v->pos, lit ? v->nrm : NULL);
+        if (has_color && !nv_fetch_attr(3, idx, tmp, &colour)) return 0;
+        v->color = colour;
+        tmp[0] = tmp[1] = tmp[2] = 0.0f; tmp[3] = 1.0f;
+        v->spec = !nv_fetch_attr(4, idx, tmp, &sc) ? 0 : (spec_type == 0 || spec_type == 4) ? sc : nv_pack_color(tmp);
+        for (t = 0; t < 4; t++) {
+            v->tex[t][0] = v->tex[t][1] = v->tex[t][2] = 0.0f; v->tex[t][3] = 1.0f;
+            nv_fetch_attr(9 + t, idx, v->tex[t], NULL);
+        }
+        s_vstamp[d] = s_vgen; s_vslot[d] = nv;
+        s_gs[i] = (uint16_t)nv;
+        nv++;
+    }
+    if (is_quads) {
+        uint32_t q;
+        for (q = 0; q + 3 < n; q += 4) {
+            s_gi[ni++] = s_gs[q + 0]; s_gi[ni++] = s_gs[q + 1]; s_gi[ni++] = s_gs[q + 2];
+            s_gi[ni++] = s_gs[q + 0]; s_gi[ni++] = s_gs[q + 2]; s_gi[ni++] = s_gs[q + 3];
+        }
+    } else if (prim == D3DPT_TRIANGLEFAN) {
+        for (i = 2; i < n; i++) { s_gi[ni++] = s_gs[0]; s_gi[ni++] = s_gs[i - 1]; s_gi[ni++] = s_gs[i]; }
+    } else {
+        for (i = 0; i < n; i++) s_gi[ni++] = s_gs[i];
+    }
+    if (ni < 3) { d3d8_Nv2aPS_Disarm(); return 1; }
+
+    /* Constants: the fixed-function set plus each stage's texgen. */
+    nv_ff_constants(&cb.ff, ctx, lit, has_color, skinned);
+    if (nrm_ok) cb.ff.flags |= NV2ATS_NRM_OK;
+    for (t = 0; t < 4; t++) {
+        const uint32_t *g = &g_pg_reg[(0x3C0 >> 2) + t * 4];
+        uint32_t sf = 0;
+        int k;
+        if (nv_stage_eye_projective(t)) {
+            sf |= NV2ATS_S_EYEPROJ;
+            for (c = 0; c < 4; c++) if (g[c] == 0x2400u) sf |= NV2ATS_S_EYELIN0 << c;
+        }
+        if (g[0] == 0x8512u) sf |= NV2ATS_S_REFLECT;
+        if (g_pg_reg[(0x420 >> 2) + t]) sf |= NV2ATS_S_TEXMTX;
+        for (c = 0; c < 4; c++)
+            for (k = 0; k < 4; k++) {
+                cb.plane[t][c][k] = u2f(g_pg_reg[((0x840 + 0x40 * t + 0x10 * c) >> 2) + k]);
+                cb.mtx[t][c][k]   = u2f(g_pg_reg[((0x6C0 + 0x40 * t) >> 2) + c * 4 + k]);
+            }
+        cb.scale[t][0] = rs[t]; cb.scale[t][1] = rt[t]; cb.scale[t][2] = cb.scale[t][3] = 0.0f;
+        cb.sflags[t] = sf;
+    }
+
+    nv_ts_bind(dev, shader_prog, 0);
+    {
+        int clipped = nv_apply_window_clip();
+        dev->lpVtbl->BeginScene(dev);
+        d3d8_DrawNv2aTS(s_tsv, nv, s_gi, ni,
+                        (prim == D3DPT_TRIANGLESTRIP) ? 5 /* D3D11 TRIANGLESTRIP */ : 4 /* TRIANGLELIST */,
+                        &cb);
+        if (clipped) { extern void d3d8_ResetScissorRect(void); d3d8_ResetScissorRect(); }
+    }
+    nv_ts_done(dev, ni);
+    return 1;
 }
 
 /* 1 = drawn (or dropped), 0 = not a texture-shader draw / shader unavailable. */
 static int nv_submit_texshader(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int prim, int is_quads)
 {
-    static NvTsVertex *s_v, *s_c;
-    static uint32_t s_vcap, s_ccap;
-    uint32_t n = g_pg.idx_count, out_n, i, ntri, cn = 0;
+    static NvTsVertex *s_v, *s_c, *s_u;
+    static uint32_t s_vcap, s_ccap, s_ucap;
+    uint32_t n = g_pg.idx_count, out_n, i, ntri, cn = 0, lo = 0, nu = 0;
+    int reuse;
     Nv2aPSKey key;
     Nv2aPSConsts cb;
     float rs[4], rt[4];
@@ -3208,24 +3336,34 @@ static int nv_submit_texshader(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int
         }
     }
 
+    if (nv_gpu_ts_submit(dev, ctx, prim, is_quads, key.shader_prog, rs, rt)) return 1;
+
     /* Vertices, quads expanded to lists. */
     out_n = is_quads ? (n / 4) * 6 : n;
     if (s_vcap < out_n) { void *p = realloc(s_v, out_n * sizeof *s_v); if (!p) { d3d8_Nv2aPS_Disarm(); return 1; } s_v = p; s_vcap = out_n; }
+    /* Repeated indices copy the vertex built the first time (see nv_vreuse_begin). */
+    reuse = nv_vreuse_begin(g_pg.idx, n, &lo);
+    if (reuse && s_ucap < n) { void *p = realloc(s_u, n * sizeof *s_u); if (!p) { d3d8_Nv2aPS_Disarm(); return 1; } s_u = p; s_ucap = n; }
     s_tc_want = 1;
     { extern int g_vpn; g_vpn = 0; }
     for (i = 0; i < n; i++) {
         OutputVertex ov;
         NvTsVertex tv;
-        uint32_t slot = i;
-        nv_build_array_vertex(g_pg.idx[i], &ov, ctx);
-        tv.x = ov.x; tv.y = ov.y; tv.z = ov.z; tv.rhw = ov.rhw;
-        tv.d0 = ov.color; tv.d1 = s_spec_out;
-        memcpy(tv.tc, s_tc_out, sizeof tv.tc);
-        memcpy(tv.q, s_tq_out, sizeof tv.q); memcpy(tv.r, s_tr_out, sizeof tv.r);
-        {   int st;   /* a projected linear target is addressed in texels */
-            for (st = 0; st < 4; st++) if (rs[st] != 1.0f || rt[st] != 1.0f) { tv.tc[st][0] *= rs[st]; tv.tc[st][1] *= rt[st]; }
+        uint32_t slot = i, d = g_pg.idx[i] - lo;
+        if (reuse && s_vstamp[d] == s_vgen) {
+            tv = s_u[s_vslot[d]];
+        } else {
+            nv_build_array_vertex(g_pg.idx[i], &ov, ctx);
+            tv.x = ov.x; tv.y = ov.y; tv.z = ov.z; tv.rhw = ov.rhw;
+            tv.d0 = ov.color; tv.d1 = s_spec_out;
+            memcpy(tv.tc, s_tc_out, sizeof tv.tc);
+            memcpy(tv.q, s_tq_out, sizeof tv.q); memcpy(tv.r, s_tr_out, sizeof tv.r);
+            {   int st;   /* a projected linear target is addressed in texels */
+                for (st = 0; st < 4; st++) if (rs[st] != 1.0f || rt[st] != 1.0f) { tv.tc[st][0] *= rs[st]; tv.tc[st][1] *= rt[st]; }
+            }
+            if (!(tv.x == tv.x) || !(tv.y == tv.y) || !(tv.rhw == tv.rhw)) { s_tc_want = 0; d3d8_Nv2aPS_Disarm(); return 1; }
+            if (reuse) { s_u[nu] = tv; s_vstamp[d] = s_vgen; s_vslot[d] = nu++; }
         }
-        if (!(tv.x == tv.x) || !(tv.y == tv.y) || !(tv.rhw == tv.rhw)) { s_tc_want = 0; d3d8_Nv2aPS_Disarm(); return 1; }
         if (is_quads) {
             uint32_t q = (i / 4) * 6, c = i & 3;
             if (i / 4 >= n / 4) continue;

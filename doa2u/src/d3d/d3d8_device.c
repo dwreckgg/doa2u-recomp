@@ -2255,3 +2255,41 @@ long d3d8_DrawNv2aFF(const Nv2aFFVertex *verts, unsigned nverts,
     }
     return S_OK;
 }
+
+/* Texture-shader draws: as above, with the PS side set up for the XYZRHW
+ * texture-shader vertex the CPU path draws (the armed NV2A pixel shader). */
+long d3d8_DrawNv2aTS(const Nv2aTSVertex *verts, unsigned nverts,
+                     const uint16_t *idx, unsigned nidx, int topology,
+                     const Nv2aTSConstants *cb)
+{
+    UINT stride = sizeof(Nv2aTSVertex), vb_off, ib_off;
+    if (!verts || !idx || !nverts || !nidx) return E_INVALIDARG;
+    g_d3d_draw_count++; if (g_off_active) g_d3d_draw_off++;
+
+    vb_off = up_ring_upload(verts, nverts * stride);
+    if (vb_off == (UINT)-1) return E_OUTOFMEMORY;
+    ib_off = nv2aff_idx_upload(idx, nidx * 2);
+    if (ib_off == (UINT)-1) return E_OUTOFMEMORY;
+
+    d3d8_shaders_prepare_draw(D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX4 | D3DFVF_NV2A_QR);
+    d3d8_combiners_prepare_draw();
+    d3d8_states_apply();
+    if (!d3d8_Nv2aTS_Bind(cb)) return E_FAIL;
+
+    ID3D11DeviceContext_IASetVertexBuffers(g_device_state.d3d11_context, 0, 1, &g_up_ring_buffer, &stride, &vb_off);
+    ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context, g_nv2aff_idx_ring, DXGI_FORMAT_R16_UINT, 0);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_device_state.d3d11_context, (D3D11_PRIMITIVE_TOPOLOGY)topology);
+    ID3D11DeviceContext_DrawIndexed(g_device_state.d3d11_context, nidx, ib_off / 2, 0);
+
+    if (g_cur_vb) {
+        D3D8VertexBuffer *vb = (D3D8VertexBuffer *)g_cur_vb;
+        UINT restore_offset = 0;
+        ID3D11DeviceContext_IASetVertexBuffers(g_device_state.d3d11_context, 0, 1, &vb->d3d11_buffer, &g_cur_vb_stride, &restore_offset);
+    }
+    if (g_cur_ib) {
+        D3D8IndexBuffer *ib = (D3D8IndexBuffer *)g_cur_ib;
+        ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context, ib->d3d11_buffer,
+            (ib->format == D3DFMT_INDEX32) ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+    }
+    return S_OK;
+}

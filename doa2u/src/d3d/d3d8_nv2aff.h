@@ -41,15 +41,44 @@ typedef struct {
     uint32_t pad[3];
 } Nv2aFFConstants;
 
+/* Texture-shader draws: FF transform/lighting plus four stages of texgen and
+ * the specular colour, for the NV2A pixel shader. 100 bytes. */
+typedef struct {
+    float    pos[4];
+    float    nrm[3];
+    uint32_t color;      /* D3DCOLOR */
+    uint32_t spec;       /* D3DCOLOR */
+    float    tex[4][4];  /* raw stage texcoords, unset components (0,0,0,1) */
+} Nv2aTSVertex;
+
+#define NV2ATS_NRM_OK    0x10u   /* Flags: a normal is supplied for reflection texgen */
+
+#define NV2ATS_S_EYEPROJ 0x01u   /* stage flags: eye-linear texgen + texture matrix */
+#define NV2ATS_S_EYELIN0 0x02u   /* << c: component c takes its eye-linear plane */
+#define NV2ATS_S_REFLECT 0x20u   /* REFLECTION_MAP texgen */
+#define NV2ATS_S_TEXMTX  0x40u   /* texture matrix on (reflection path) */
+
+typedef struct {
+    Nv2aFFConstants ff;
+    float    plane[4][4][4];  /* [stage][component]: eye-linear plane */
+    float    mtx[4][4][4];    /* [stage][row]: texture matrix */
+    float    scale[4][4];     /* [stage]: s, t texel scale for projected linear targets */
+    uint32_t sflags[4];
+} Nv2aTSConstants;
+
 /* d3d8_device.c: upload, bind and draw. `topology` is a D3D11_PRIMITIVE_TOPOLOGY. */
 long d3d8_DrawNv2aFF(const Nv2aFFVertex *verts, unsigned nverts,
                      const uint16_t *idx, unsigned nidx, int topology,
                      const Nv2aFFConstants *cb);
+long d3d8_DrawNv2aTS(const Nv2aTSVertex *verts, unsigned nverts,
+                     const uint16_t *idx, unsigned nidx, int topology,
+                     const Nv2aTSConstants *cb);
 
 /* d3d8_shaders.c: compile once; bind VS + layout + constants for one draw. */
 long d3d8_Nv2aFF_Init(void);
 void d3d8_Nv2aFF_Shutdown(void);
 int  d3d8_Nv2aFF_Bind(const Nv2aFFConstants *cb);
+int  d3d8_Nv2aTS_Bind(const Nv2aTSConstants *cb);
 
 /* NV2A texture shader + register combiners as one pixel shader, keyed on the
  * raw pushbuffer registers (stage program, combiner words, alpha test). */
