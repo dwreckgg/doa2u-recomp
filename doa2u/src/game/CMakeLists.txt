@@ -44,6 +44,7 @@ target_link_libraries(doa2u PRIVATE
     input_compat
     apu_emu
     doa2u_ui
+    doa2u_online
     kernel32
     user32
     gdi32
@@ -94,3 +95,19 @@ set_target_properties(doa2u PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/release"
     PDB_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/debug"
 )
+
+# Host-only tests: plain executables built with everything, exit code =
+# failures; tests/run_host_tests.sh runs every *_test.exe. Tools such as
+# netplay_memdiff sit beside them and are not run.
+function(doa2u_host_test name)
+    add_executable(${name} ${ARGN})
+    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+    set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+    if(MSVC)
+        target_compile_options(${name} PRIVATE /W3 /WX-)
+        target_compile_definitions(${name} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+endfunction()
+
+set(ONLINE_DIR ${CMAKE_SOURCE_DIR}/src/online)
+doa2u_host_test(netplay_format_test ${ONLINE_DIR}/netplay_format.c ${CMAKE_SOURCE_DIR}/tests/netplay_format_test.c)

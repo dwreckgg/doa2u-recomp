@@ -27,6 +27,7 @@ add_subdirectory(src/audio)    # DirectSound host backend
 add_subdirectory(src/input)    # Xbox input -> XInput / keyboard
 add_subdirectory(src/apu)      # MCPX APU emulation (from xemu)
 add_subdirectory(src/ui)       # Overlay menu (Esc key)
+add_subdirectory(src/online)   # Online play (join codes, lockstep sessions)
 
 # Recompiled game executable
 add_subdirectory(src/game)
