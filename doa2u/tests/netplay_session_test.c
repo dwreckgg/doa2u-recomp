@@ -1,0 +1,284 @@
+/* netplay_session.c against the fake game: the barrier, the pre-session
+ * mirror, recording and replay (matching and diverging), the ring of recent
+ * frames, and the online provider path (start parameters, joiner restore,
+ * transitions). */
+#include "online/netplay_session.h"
+#include "fake_game.h"
+#include "netplay_stubs.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <windows.h>
+
+static int failures;
+#define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
+
+static np_status st(void) { np_status s; memset(&s, 0, sizeof s); netplay_get_status(&s); return s; }
+
+static void tick(void)
+{
+    fake_game_poll();
+    netplay_input_tick();
+    fake_game_step();
+}
+
+/* Reach an active session from the character select: posed, io quiet. */
+static int reach_barrier(void)
+{
+    int i;
+    fg.at_charsel = 1;
+    fg.posed = 1;
+    for (i = 0; i < 40 && st().state != NP_STATE_ACTIVE; i++) tick();
+    return st().state == NP_STATE_ACTIVE;
+}
+
+/* The scripted match every recording and replay plays: pads from the frame
+ * number, the fight from frame 5, a screen change there, out at frame 30. */
+static void script(uint32_t frame)
+{
+    fg.host[0].buttons = (uint16_t)(frame * 37u + 1u);
+    fg.host[0].lx = (int16_t)(frame * 100);
+    fg.host[1].buttons = (uint16_t)(frame * 11u);
+    if (frame == 5) { fg.in_fight = 1; fg.at_charsel = 0; fg.screen = 2; }
+    if (frame == 30) fg.left = 1;
+}
+
+static int play_match(int perturb_at)
+{
+    int i;
+    for (i = 0; i < 60 && st().state == NP_STATE_ACTIVE; i++) {
+        uint32_t f = netplay_session_frame();
+        script(f);
+        if ((int)f == perturb_at) fg_mem(FG_FIGHTERS)[5] ^= 0xFF;
+        tick();
+    }
+    return st().state != NP_STATE_ACTIVE;
+}
+
+static void reset_screens(void)
+{
+    fg.in_fight = 0; fg.left = 0; fg.screen = 1;
+    fg.at_charsel = 0; fg.posed = 0;
+    memset(fg.host, 0, sizeof fg.host);
+}
+
+static void test_barrier_and_mirror(void)
+{
+    int i;
+    uint8_t before[FG_SAVE_LEN];
+    fake_game_reset();
+    fg_mem(FG_SAVE)[26] = 0; fg_mem(FG_SAVE)[27] = 2;            /* this profile: nothing unlocked */
+    memcpy(before, fg_mem(FG_SAVE), FG_SAVE_LEN);
+    netplay_set_mirror(1);
+    netplay_set_armed(1, NP_ROLE_HOST);
+    CHECK(netplay_forced_pads() == NP_SESSION_PADS);              /* one controller: port 1 forced */
+    CHECK(netplay_filter_pad_mask(0x1) == NP_SESSION_PADS);
+
+    fg.at_charsel = 1;                                           /* previews still loading */
+    for (i = 0; i < 12; i++) tick();
+    CHECK(st().state == NP_STATE_ARMED);
+
+    fg.host[0].buttons = 0x10;
+    tick();
+    CHECK(fg.slot[1].buttons == 0x10);                           /* pre-session mirror */
+
+    fg.posed = 1;
+    for (i = 0; i < 5; i++) tick();
+    g_io++;                                                      /* a file read: start over */
+    for (i = 0; i < 10; i++) tick();                             /* the reset frame, then 9 quiet */
+    CHECK(st().state == NP_STATE_ARMED);
+    CHECK(g_det_begin == 0);
+    tick();                                                      /* the 10th quiet frame */
+    CHECK(st().state == NP_STATE_ACTIVE);
+    CHECK(netplay_session_frame() == 1);                         /* frame 0 ran in the same tick */
+    CHECK(g_det_begin == 1 && g_apu_begin == 1);
+    CHECK(fg.forced == NP_SESSION_PADS && fg.force_calls == 1);
+    CHECK(fg.packet[0] == 0x1000u && fg.packet[1] == 0x1000u);   /* frame 0's packet */
+    CHECK(fg.slot[1].buttons == fg.slot[0].buttons);             /* in-session mirror */
+    CHECK(fg_mem(FG_SAVE)[26] == 1 && fg_mem(FG_SAVE)[27] == 7);  /* the match runs unlocked */
+    CHECK(fg.redirect == 1);                                      /* the host's saves go aside too */
+
+    netplay_set_armed(0, NP_ROLE_HOST);
+    tick();
+    CHECK(st().state == NP_STATE_OFF && g_det_end == 1 && g_apu_end == 1);
+    CHECK(!memcmp(fg_mem(FG_SAVE), before, FG_SAVE_LEN));         /* the profile is as it was */
+    CHECK(fg.redirect == 0);
+    netplay_set_mirror(0);
+}
+
+static int find_replay(char *out, size_t cap)
+{
+    char names[8][128];
+    int n = netplay_list_replays(names, 8);
+    if (n != 1) return 0;
+    strncpy(out, names[0], cap - 1);
+    out[cap - 1] = 0;
+    return 1;
+}
+
+static void test_record_and_replay(void)
+{
+    char name[128];
+    np_status s;
+    uint32_t frames;
+
+    fake_game_reset();
+    netplay_set_record(1);
+    netplay_set_armed(1, NP_ROLE_HOST);
+    CHECK(reach_barrier());
+    CHECK(play_match(-1));
+    s = st();
+    CHECK(strncmp(s.message, "Recorded netplay_replay_", 24) == 0);
+    netplay_set_armed(0, NP_ROLE_HOST);
+    netplay_set_record(0);
+    tick();
+    CHECK(find_replay(name, sizeof name));
+    frames = 0;
+
+    /* Replay on a game that has moved on since: the start parameters put the
+     * regions, the save image and the seed back. */
+    reset_screens();
+    fg_mem(FG_FIGHTERS)[0] = 0x77;
+    netplay_request_replay(name);
+    tick();
+    s = st();
+    CHECK(strncmp(s.message, "Replay ready (Single Battle", 27) == 0);
+    frames = s.replay_frames;
+    CHECK(frames >= 30);
+    CHECK(reach_barrier());
+    CHECK(play_match(-1));
+    s = st();
+    CHECK(strncmp(s.message, "Replay matched the recording for all", 36) == 0);
+    CHECK(s.diverged_at == NP_NO_FRAME);
+    CHECK(netplay_armed() == 0);                                 /* a replay runs once */
+
+    /* The same replay with one fighter byte flipped before frame 12 is
+     * recorded: the state entering frame 12 differs, in the fighters region. */
+    reset_screens();
+    netplay_request_replay(name);
+    tick();
+    CHECK(reach_barrier());
+    CHECK(play_match(12));
+    s = st();
+    CHECK(s.diverged_at == 12);
+    CHECK(strstr(s.message, "DIVERGED at frame 12 (fighters") != NULL);
+
+    remove(name);
+}
+
+static void test_ring(void)
+{
+    uint32_t h[NP_MAX_REGIONS];
+    int i;
+    fake_game_reset();
+    netplay_set_armed(1, NP_ROLE_HOST);
+    CHECK(reach_barrier());
+    fg.in_fight = 1;
+    for (i = 0; i < 299; i++) tick();
+    CHECK(netplay_session_frame() == 300);
+    CHECK(netplay_session_frame_regions(299, h, NP_MAX_REGIONS) == netplay_session_region_count());
+    CHECK(netplay_session_frame_regions(44, h, NP_MAX_REGIONS) == 5);   /* 2 sync + 2 extra + seedclock */
+    CHECK(netplay_session_frame_regions(43, h, NP_MAX_REGIONS) == 0);   /* older than 256 frames */
+    CHECK(netplay_session_frame_regions(300, h, NP_MAX_REGIONS) == 0);  /* not yet */
+    CHECK(strcmp(netplay_session_region_name(0), "fighters") == 0);
+    CHECK(strcmp(netplay_session_region_name(4), "seedclock") == 0);
+    netplay_set_armed(0, NP_ROLE_HOST);
+    tick();
+}
+
+/* ── provider ────────────────────────────────────────────────────────── */
+
+static uint8_t  s_blob[4096];
+static uint32_t s_blob_len;
+static int      s_barrier_calls, s_ends, s_transitions[4], s_ntrans, s_digests;
+static uint32_t s_last_digest_frame;
+
+static int pv_barrier(int at_barrier, int tag)
+{
+    (void)tag;
+    s_barrier_calls++;
+    if (!at_barrier) return 0;
+    return netplay_params_load(s_blob, s_blob_len) ? 1 : -1;
+}
+
+static int pv_exchange(const np_pad *local, np_pad out[2])
+{
+    out[0] = *local;
+    memset(&out[1], 0, sizeof out[1]);
+    out[1].buttons = 0x4242;
+    return 1;
+}
+
+static void pv_digest(uint32_t frame, uint64_t digest) { (void)digest; s_digests++; s_last_digest_frame = frame; }
+static void pv_end(void) { s_ends++; }
+static int  pv_transition(uint32_t index) { if (s_ntrans < 4) s_transitions[s_ntrans++] = (int)index; return 1; }
+
+static void test_provider(void)
+{
+    static const np_provider pv = { pv_barrier, pv_exchange, pv_digest, pv_end, pv_transition };
+    uint8_t joiner_layout[NP_LAYOUT_MAX] = { 9, 8, 7, 6 }, local_save[FG_SAVE_LEN];
+    const uint8_t *blob;
+    uint32_t len;
+    int i;
+
+    /* the host's machine: fighters pattern A, its own save image */
+    fake_game_reset();
+    for (i = 0; i < 16; i++) fg_mem(FG_FIGHTERS)[i] = (uint8_t)(0xA0 + i);
+    for (i = 0; i < (int)FG_SAVE_LEN; i++) fg_mem(FG_SAVE)[i] = (uint8_t)(0x30 + i);
+    CHECK(netplay_params_capture(&blob, &len, joiner_layout, 3));
+    CHECK(len <= sizeof s_blob);
+    memcpy(s_blob, blob, len);
+    s_blob_len = len;
+
+    /* the joiner's machine: other fighters, other save image and volumes */
+    fake_game_reset();
+    for (i = 0; i < 16; i++) fg_mem(FG_FIGHTERS)[i] = (uint8_t)(0x50 + i);
+    for (i = 0; i < (int)FG_SAVE_LEN; i++) fg_mem(FG_SAVE)[i] = (uint8_t)(0x90 + i);
+    memcpy(local_save, fg_mem(FG_SAVE), FG_SAVE_LEN);
+
+    netplay_set_provider(&pv);
+    netplay_set_armed(1, NP_ROLE_JOINER);
+    CHECK(netplay_forced_pads() == NP_SESSION_PADS);              /* online lobby */
+    CHECK(reach_barrier());
+    CHECK(s_barrier_calls >= 10);
+    for (i = 0; i < 16; i++) CHECK(fg_mem(FG_FIGHTERS)[i] == (uint8_t)(0xA0 + i));   /* host's state */
+    CHECK(fg_mem(FG_SAVE)[0] == 0x90 && fg_mem(FG_SAVE)[1] == 0x91);                  /* own volumes */
+    CHECK(fg_mem(FG_SAVE)[2] == 0x32);                                                 /* host's settings */
+    CHECK(fg_mem(FG_SAVE)[26] == 1 && fg_mem(FG_SAVE)[27] == 7);                      /* unlocked, from the host's capture */
+    CHECK(!memcmp(fg_mem(FG_SAVE + 12), joiner_layout, FG_LAYOUT_LEN));               /* port 1 = joiner layout */
+    CHECK(fg_mem(FG_SAVE + 25)[0] == 3);
+    CHECK(fg.redirect == 1);
+    CHECK(fg.slot[1].buttons == 0x4242);                          /* the exchange's pads went in */
+
+    fg.screen = 7;                                               /* a screen change */
+    tick();
+    CHECK(s_ntrans == 1 && s_transitions[0] == 1);
+    CHECK(s_digests == 2 && s_last_digest_frame == 1);
+
+    fg.left = 1;
+    tick();
+    CHECK(s_ends == 1);
+    CHECK(fg.redirect == 0);
+    CHECK(!memcmp(fg_mem(FG_SAVE), local_save, FG_SAVE_LEN));    /* the joiner's own image back */
+    netplay_set_armed(0, NP_ROLE_HOST);
+    tick();
+    netplay_set_provider(NULL);
+}
+
+int main(void)
+{
+    test_barrier_and_mirror();
+    test_record_and_replay();
+    test_ring();
+    test_provider();
+    {   /* digest logs written by the replays */
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA("netplay_digest_*.txt", &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do DeleteFileA(fd.cFileName); while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+    }
+    printf("netplay_session_test: %d failure(s)\n", failures);
+    return failures;
+}

@@ -49,6 +49,11 @@ void xbox_path_set_title_redirect(int on)
         swprintf_s(copy_dir, MAX_PATH, L"%s\\TitleData_netplay", s_save_dir);
         CreateDirectoryW(s_save_dir, NULL);
         copy_dir_files(real_dir, copy_dir);
+        /* DOA2U keeps its save game under U: (UserData\\<id>\\ups.dat), so
+         * the joiner's saves during a session are redirected there too. */
+        swprintf_s(real_dir, MAX_PATH, L"%s\\UserData", s_save_dir);
+        swprintf_s(copy_dir, MAX_PATH, L"%s\\UserData_netplay", s_save_dir);
+        copy_dir_files(real_dir, copy_dir);
     }
     InterlockedExchange(&s_title_redirect, on ? 1 : 0);
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_PATH, "TitleData redirect %s", on ? "ON" : "OFF");
@@ -169,7 +174,7 @@ BOOL xbox_translate_path(const char* xbox_path, WCHAR* win_path_buf, DWORD buf_s
     if (skip) {
         remainder = xbox_path + skip;
         base_dir = s_save_dir;
-        sub_dir = L"\\UserData";
+        sub_dir = s_title_redirect ? L"\\UserData_netplay" : L"\\UserData";
         goto translate;
     }
 
