@@ -20,7 +20,7 @@ extern "C" {
 #include "video_settings.h"
 #include "log_settings.h"
 #include "profile_settings.h"
-#include "unlockables.h"
+#include "extras.h"
 #include "../kernel/perf.h"
 ID3D11RenderTargetView *d3d8_GetPresentRTV(void);
 UINT                    d3d8_GetPresentWidth(void);
@@ -509,17 +509,15 @@ void DrawProfileSection()
         profile_set_language(lang ? PROFILE_LANG_JAPANESE : PROFILE_LANG_ENGLISH);
 }
 
-/* ── Unlockables section ───────────────────────────────────────────────────────*/
+/* ── Extras section ───────────────────────────────────────────────────────*/
 
-void DrawUnlockablesSection()
+void DrawExtrasSection()
 {
+    if (!ImGui::CollapsingHeader("Unlockables", ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+
     unlock_status st;
-    unlockables_status(&st);
-
-    ImGui::TextWrapped("Saves all newly changed unlockable data into the currently loaded "
-                       "player profile the next time a setting is changed or match is finished");
-    ImGui::Separator();
-
+    extras_status(&st);
     if (!st.profile_loaded) {
         ImGui::TextDisabled("No player profile loaded yet. Get past the title screen first.");
         return;
@@ -527,7 +525,7 @@ void DrawUnlockablesSection()
 
     ImGui::Text("Hidden characters: %d of %d unlocked", st.characters_unlocked, UNLOCK_HIDDEN_CHARACTERS);
     if (ImGui::Button("Unlock all characters")) {
-        int n = unlockables_unlock_characters();
+        int n = extras_unlock_characters();
         char msg[96];
         _snprintf_s(msg, sizeof msg, _TRUNCATE,
                     n > 0 ? "Unlocked %d hidden character(s)" : "All hidden characters were already unlocked", n);
@@ -537,7 +535,7 @@ void DrawUnlockablesSection()
     ImGui::Spacing();
     ImGui::Text("Costumes: %d of %d characters", st.costume_slots_maxed, st.costume_slots_total);
     if (ImGui::Button("Unlock all costumes")) {
-        int n = unlockables_unlock_costumes();
+        int n = extras_unlock_costumes();
         char msg[96];
         _snprintf_s(msg, sizeof msg, _TRUNCATE,
                     n > 0 ? "Unlocked every costume for %d character(s)" : "Every costume was already unlocked", n);
@@ -547,7 +545,7 @@ void DrawUnlockablesSection()
     ImGui::Spacing();
     ImGui::Text("System voices: %d of %d unlocked", st.voices_unlocked, UNLOCK_SYSTEM_VOICES);
     if (ImGui::Button("Unlock all system voices")) {
-        int n = unlockables_unlock_voices();
+        int n = extras_unlock_voices();
         SetStatus(n > 0 ? "Unlocked Kasumi, Ayane, Ein, Raidou and Tengu as system voices"
                         : "Every system voice was already unlocked");
     }
@@ -558,11 +556,9 @@ void DrawUnlockablesSection()
     ImGui::Separator();
     if (!wipe_armed) {
         if (ImGui::Button("Wipe unlockables")) wipe_armed = true;
-        ImGui::SameLine();
-        ImGui::TextDisabled("resets characters, costumes and system voices to a fresh profile");
     } else {
         if (ImGui::Button("Click again to wipe")) {
-            int n = unlockables_wipe();
+            int n = extras_wipe();
             char msg[96];
             _snprintf_s(msg, sizeof msg, _TRUNCATE,
                         n > 0 ? "Wiped: %d value(s) reset to fresh-profile defaults" : "Nothing to wipe, profile already at defaults", n);
@@ -713,8 +709,8 @@ void DrawMenu()
                 DrawProfileSection();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Unlockables")) {
-                DrawUnlockablesSection();
+            if (ImGui::BeginTabItem("Extras")) {
+                DrawExtrasSection();
                 ImGui::EndTabItem();
             }
 

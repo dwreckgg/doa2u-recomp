@@ -1,12 +1,9 @@
-/* Unlockables (see unlockables.h for the layout and where it came from). */
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#include "unlockables.h"
+#include "extras.h"
 
-/* Xbox VA -> host pointer. Every address here is a fixed Xbox VA, so the
- * plain offset add is exactly what recomp_types.h's XBOX_PTR does for it. */
 extern ptrdiff_t g_xbox_mem_offset;
 
 #define GAMEDATA_PTR_VA   0x87CFA8u   /* uint32_t: Xbox VA of the game-data block */
@@ -36,10 +33,7 @@ static uint32_t xb32_read(uint32_t va)
     return v;
 }
 
-/* Xbox VA of the live game-data block, or 0 when none is reachable or no
- * player profile has been loaded into it yet. The pointer is set at boot and
- * the block then holds defaults until a profile is picked, so the game's own
- * loaded flag (read by its sub_00023BB0 accessor) decides. */
+/* Xbox VA of the game-data block, or 0 until a player profile is loaded. */
 static uint32_t gamedata_va(void)
 {
     uint32_t va = xb32_read(GAMEDATA_PTR_VA);
@@ -50,8 +44,7 @@ static uint32_t gamedata_va(void)
     return va;
 }
 
-/* Costume total for the character in a slot, or 0 when either table entry is
- * not believable. */
+/* Costume total for the character in a slot, or 0 if the tables look wrong. */
 static uint32_t costume_cap(int slot)
 {
     uint8_t id = *xb8(SLOT_ID_TABLE + (uint32_t)slot);
@@ -63,8 +56,7 @@ static uint32_t costume_cap(int slot)
     return total;
 }
 
-/* The 20 bytes the voice unlock owns: the 15 progress bytes first, then the
- * 5 voice bytes. */
+/* 15 Survival-progress bytes, then the 5 voice bytes. */
 #define VOICE_BYTES (UNLOCK_VOICE_PROGRESS + UNLOCK_SYSTEM_VOICES)
 
 static volatile uint8_t *voice_byte(uint32_t gd, int i)
@@ -74,7 +66,6 @@ static volatile uint8_t *voice_byte(uint32_t gd, int i)
     return xb8(gd + OFF_VOICE_BONUS + (uint32_t)(i - UNLOCK_VOICE_PROGRESS));
 }
 
-/* Writes v to *p when it differs; returns 1 when it wrote. */
 static int set_byte(volatile uint8_t *p, uint8_t v)
 {
     if (*p == v)
@@ -83,7 +74,25 @@ static int set_byte(volatile uint8_t *p, uint8_t v)
     return 1;
 }
 
-int unlockables_status(unlock_status *out)
+/* Set when an unlock or wipe changed the block; the vblank hook then runs the
+ * game's own profile save so the change reaches ups.dat right away. */
+static volatile int s_save_requested;
+
+static int request_save(int changed)
+{
+    if (changed > 0)
+        s_save_requested = 1;
+    return changed;
+}
+
+int doa2u_extras_take_save_request(void)
+{
+    int r = s_save_requested;
+    s_save_requested = 0;
+    return r;
+}
+
+int extras_status(unlock_status *out)
 {
     memset(out, 0, sizeof *out);
 
@@ -111,7 +120,7 @@ int unlockables_status(unlock_status *out)
     return 1;
 }
 
-int unlockables_unlock_characters(void)
+int extras_unlock_characters(void)
 {
     uint32_t gd = gamedata_va();
     if (!gd)
@@ -125,10 +134,10 @@ int unlockables_unlock_characters(void)
             changed++;
         }
     }
-    return changed;
+    return request_save(changed);
 }
 
-int unlockables_unlock_costumes(void)
+int extras_unlock_costumes(void)
 {
     uint32_t gd = gamedata_va();
     if (!gd)
@@ -145,10 +154,10 @@ int unlockables_unlock_costumes(void)
             raised++;
         }
     }
-    return raised;
+    return request_save(raised);
 }
 
-int unlockables_unlock_voices(void)
+int extras_unlock_voices(void)
 {
     uint32_t gd = gamedata_va();
     if (!gd)
@@ -157,10 +166,10 @@ int unlockables_unlock_voices(void)
     int changed = 0;
     for (int i = 0; i < VOICE_BYTES; i++)
         changed += set_byte(voice_byte(gd, i), 1);
-    return changed;
+    return request_save(changed);
 }
 
-int unlockables_wipe(void)
+int extras_wipe(void)
 {
     uint32_t gd = gamedata_va();
     if (!gd)
@@ -173,5 +182,5 @@ int unlockables_wipe(void)
         changed += set_byte(xb8(gd + OFF_COSTUME_COUNTS + (uint32_t)slot), UNLOCK_DEFAULT_COSTUMES);
     for (int i = 0; i < VOICE_BYTES; i++)
         changed += set_byte(voice_byte(gd, i), 0);
-    return changed;
+    return request_save(changed);
 }
