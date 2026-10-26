@@ -400,8 +400,24 @@ static int at_barrier(void)
     return ++s_quiet_frames >= BARRIER_QUIET_FRAMES;
 }
 
-static void end_session(void)
+/* One-controller mirror: both pads get the real pad's input, except on the
+ * pause menu. That menu belongs to the pad whose Start the game took (either
+ * one, since both pressed it), and the other pad pressing the same keys there
+ * makes the game show "Please reconnect the controller to controller port %d"
+ * and ignore the menu (measured 2026-10-26, with and without a session). So
+ * while paused the owner gets the input and the other pad is neutral. */
+static void mirror_pair(np_pad in[2])
 {
+    int owner = np_game_pause_owner();
+    if (owner == 0) memset(&in[1], 0, sizeof in[1]);
+    else if (owner == 1) { in[1] = in[0]; memset(&in[0], 0, sizeof in[0]); }
+    else in[1] = in[0];
+}
+
+static void end_session(const char *why)
+{
+    if (online_get_diag())
+        fprintf(stderr, "[netplay] session ended at frame %u (%s), screen key %08X\n", s_frame, why, np_game_screen_key());
     mcpx_apu_det_end();
     xbox_det_end();
     if (s_have_backup) {
@@ -525,9 +541,12 @@ void netplay_input_tick(void)
         if (!s_armed) { s_state = NP_STATE_OFF; np_replay_free(&s_rp); s_rp_loaded = 0; return; }
         if (s_mirror && !s_provider) {                     /* one controller drives both cursors */
             static uint32_t packet = 0x1000u;
-            np_pad m;
+            np_pad m, none0 = {0};
+            int owner = np_game_pause_owner();              /* see mirror_pair() */
             np_game_pad_read(0, &m);
-            np_game_pad_write(1, &m, ++packet);
+            if (owner == 0) np_game_pad_write(1, &none0, ++packet);
+            else if (owner == 1) { np_game_pad_write(1, &m, ++packet); np_game_pad_write(0, &none0, packet); }
+            else np_game_pad_write(1, &m, ++packet);
         }
         if (s_provider && !s_rp_loaded) {
             /* Online: the provider says when both sides are ready. While this
@@ -552,7 +571,7 @@ void netplay_input_tick(void)
         begin_session();
     } else if (!s_armed || np_game_left_versus() || (s_replaying && s_frame >= s_rp.frames)) {
         record_frame(none);                                /* the state that ended the session */
-        end_session();
+        end_session(!s_armed ? "disarmed" : s_replaying && s_frame >= s_rp.frames ? "replay finished" : "left Versus");
         return;
     }
 
@@ -561,7 +580,7 @@ frame:
     if (s_abort) {                                         /* the transition resync did not arrive */
         s_abort = 0;
         record_frame(none);
-        end_session();
+        end_session("transition data did not arrive");
         return;
     }
     if (s_replaying) {
@@ -572,13 +591,13 @@ frame:
         np_game_pad_read(0, &local);
         if (!s_provider->exchange(&local, in)) {
             record_frame(none);
-            end_session();
+            end_session("input exchange ended");
             return;
         }
     } else {
         np_game_pad_read(0, &in[0]);
-        if (s_mirror) in[1] = in[0];
-        else np_game_pad_read(1, &in[1]);
+        if (!s_mirror) np_game_pad_read(1, &in[1]);
+        else mirror_pair(in);
     }
 
     record_frame(in);                                      /* the state entering this frame */

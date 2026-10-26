@@ -19,7 +19,7 @@
 #define FG_LAYOUT_LEN 4u
 
 typedef struct {
-    int      at_charsel, posed, tag, in_fight, left;
+    int      at_charsel, posed, tag, in_fight, left, pause_owner;   /* pause_owner: -1 none */
     uint32_t screen;
     np_pad   host[4];       /* what XInputGetState put into the raw slots this frame */
     np_pad   slot[4];       /* the raw slots the pad builder reads */

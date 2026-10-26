@@ -34,6 +34,7 @@ int      np_game_at_charsel(void);      /* on the Versus character select (Singl
 int      np_game_previews_posed(void);  /* both cursor characters' preview models are in */
 int      np_game_is_tag(void);          /* the Versus battle type is Tag */
 int      np_game_in_fight(void);
+int      np_game_pause_owner(void);     /* -1 = not paused, else the port (0/1) whose pause menu is up */
 uint32_t np_game_screen_key(void);      /* changes exactly when the screen changes */
 int      np_game_left_versus(void);     /* once per session frame: 1 = the players left Versus */
 void     np_game_session_reset(void);   /* at session start: reset left_versus's counters */

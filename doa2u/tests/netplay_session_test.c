@@ -95,6 +95,15 @@ static void test_barrier_and_mirror(void)
     CHECK(fg.forced == NP_SESSION_PADS && fg.force_calls == 1);
     CHECK(fg.packet[0] == 0x1000u && fg.packet[1] == 0x1000u);   /* frame 0's packet */
     CHECK(fg.slot[1].buttons == fg.slot[0].buttons);             /* in-session mirror */
+    fg.pause_owner = 0;                                          /* the pause menu belongs to one pad: the */
+    fg.host[0].buttons = 0x02;                                   /* other pad pressing the same keys makes */
+    tick();                                                      /* the game show its reconnect prompt */
+    CHECK(fg.slot[0].buttons == 0x02 && fg.slot[1].buttons == 0);
+    fg.pause_owner = 1;                                          /* Player 2 took the (mirrored) Start press */
+    tick();
+    CHECK(fg.slot[0].buttons == 0 && fg.slot[1].buttons == 0x02);
+    fg.pause_owner = -1;
+    fg.host[0].buttons = 0;
     CHECK(fg_mem(FG_SAVE)[26] == 1 && fg_mem(FG_SAVE)[27] == 7);  /* the match runs unlocked */
     CHECK(fg.redirect == 1);                                      /* the host's saves go aside too */
 

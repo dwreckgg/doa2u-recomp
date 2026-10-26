@@ -17,6 +17,7 @@ static xbox_det_bases s_base;
 static uint64_t s_frames;
 static uint64_t s_qpf;
 static uint64_t s_qpc_boost;        /* hot-poll boost accumulated this session */
+static uint64_t s_ft_boost;         /* filetime moved on by chip-time waits (xbox_det_add_filetime_boost) */
 static uint32_t s_kcalls;           /* guest kernel calls since session start */
 static int      s_pending_laps;
 /* Per fiber: kernel calls and hot-poll QPC boost. The audio workers' polling
@@ -80,6 +81,7 @@ void xbox_det_begin(const xbox_det_bases *b)
     s_frames = 0;
     s_qpf = (uint64_t)f.QuadPart;
     s_qpc_boost = 0;
+    s_ft_boost = 0;
     s_kcalls = 0;
     memset(s_fkcalls, 0, sizeof(s_fkcalls));
     memset(s_fboost, 0, sizeof(s_fboost));
@@ -144,8 +146,10 @@ uint64_t xbox_det_boost(void) { return s_fboost[0]; }   /* the game thread's */
 
 uint64_t xbox_det_filetime(void)
 {
-    return s_base.filetime + (s_frames * 10000000u) / 60u;
+    return s_base.filetime + (s_frames * 10000000u) / 60u + s_ft_boost;
 }
+
+void xbox_det_add_filetime_boost(uint64_t delta_100ns) { s_ft_boost += delta_100ns; }
 
 uint32_t xbox_det_tick_offset(void) { return s_tick_offset; }
 uint64_t xbox_det_qpc_offset(void)  { return s_qpc_offset; }

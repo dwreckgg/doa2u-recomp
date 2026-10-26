@@ -95,7 +95,15 @@ void doa2u_rebuild_button_maps(void);        /* recomp_manual.c: guest call */
 #define SCRST_VS_SUBMENU 1
 #define SCRST_CHARSEL    2
 #define SCRST_STAGESEL   3
-#define ROUND_VA         0x008783C8u   /* 1 from the fight intro through the results screen */
+#define ROUND_VA         0x008783C8u   /* 1 from the fight intro through the results screen; STICKY after a pause-menu Quit
+                                        * (still 1 on the title, mode menu, submenu and character select after it) */
+#define SEL_FLAG_VA(p)   (0x00852F9Fu + 0x70u * (uint32_t)(p))   /* 1 while player p's character-select panel is live: every
+                                        * character-select dump (Versus Single/Tag, Sparring, re-entered, after a Quit), 0 on all
+                                        * 30 other dumps (2026-10-26 table, classes FIGHT vs CHARSEL) */
+#define FIGHT_FLAG_VA    0x00852F45u   /* 0xFF from the fight intro through the results, 0 on every menu, load and
+                                        * character select, including the one reached by a Quit (same table) */
+#define PAUSE_VA         0x0080B55Fu   /* 1 while the pause menu is up (dump pausetest, 2026-10-26) */
+#define PAUSE_OWNER_VA   0x00878390u   /* port whose pause menu it is (dumps pausetest 0 / pause_p2_* 1; read by sub_000DB42B) */
 #define MENU_PANEL_VA    0x00806458u   /* 1 while the mode menu / Versus submenu icon panel is alive; 0 on the character
                                         * select, the results and Settings. Needed because the screen byte keeps 2 after
                                         * backing out of the character select to the submenu (measured: x_sub_back) */
@@ -112,8 +120,7 @@ void doa2u_rebuild_button_maps(void);        /* recomp_manual.c: guest call */
 
 int np_game_at_charsel(void)
 {
-    return MEM8(GAME_MODE_VA) == GAME_MODE_VERSUS && MEM8(MENU_SCREEN_VA) == SCRST_CHARSEL &&
-           MEM8(ROUND_VA) == 0 && MEM8(MENU_PANEL_VA) == 0;
+    return MEM8(GAME_MODE_VA) == GAME_MODE_VERSUS && MEM8(SEL_FLAG_VA(0)) == 1 && MEM8(SEL_FLAG_VA(1)) == 1;
 }
 
 int np_game_previews_posed(void)
@@ -122,32 +129,38 @@ int np_game_previews_posed(void)
 }
 
 int      np_game_is_tag(void) { return MEM8(TAG_FLAG_VA) != 0; }
-int      np_game_in_fight(void) { return MEM8(ROUND_VA) != 0; }
+int      np_game_in_fight(void) { return MEM8(FIGHT_FLAG_VA) == 0xFF; }
+int      np_game_pause_owner(void) { return MEM8(PAUSE_VA) ? (MEM8(PAUSE_OWNER_VA) & 1) : -1; }
 /* The panel byte also toggles with the round UI inside a fight (measured: a
  * flip 20 frames into round 1 and at each round change), so it only counts
  * on the menus: a round change is not a screen transition. */
 uint32_t np_game_screen_key(void)
 {
-    uint8_t in_round = MEM8(ROUND_VA);
+    uint32_t fight = np_game_in_fight() ? 1u : 0u;
+    uint32_t sel = ((MEM8(SEL_FLAG_VA(0)) == 1) ? 2u : 0u) | ((MEM8(SEL_FLAG_VA(1)) == 1) ? 4u : 0u);
     return ((uint32_t)MEM8(GAME_MODE_VA) << 24) | ((uint32_t)MEM8(MENU_SCREEN_VA) << 16) |
-           ((uint32_t)(!in_round && MEM8(MENU_PANEL_VA) ? 1 : 0) << 8) | in_round;
+           ((!fight && MEM8(MENU_PANEL_VA)) ? 1u << 8 : 0u) | sel | fight;
 }
 
 /* The players left Versus: another game mode (the mode menu reads 2, the
- * title 1), or the Single/Tag submenu; a Versus menu screen that is neither
- * the character select nor the stage select for MENU_EXIT_FRAMES covers any
- * other way out (the results -> character select path passes through screen
- * 0 briefly, so screen 0 alone is not an exit). */
-#define MENU_EXIT_FRAMES 600
+ * title 1), or the Single/Tag submenu, fresh (screen 1) or reached by
+ * backing out of the character select (screen stays 2, the icon panel is
+ * back). A Versus menu screen that is neither the character select nor the
+ * stage select for MENU_EXIT_FRAMES covers any other way out. Screen 0
+ * with no round is also the stage load (about 480 frames, panel byte 1,
+ * measured 2026-10-26) and the results -> character select path, so it is
+ * never an exit by itself and the timer is longer than any load. */
+#define MENU_EXIT_FRAMES 1800
 static uint32_t s_menu_frames;
 
 int np_game_left_versus(void)
 {
-    uint8_t scr = MEM8(MENU_SCREEN_VA), in_round = MEM8(ROUND_VA);
+    uint8_t scr = MEM8(MENU_SCREEN_VA);
+    int fight = np_game_in_fight(), sel = np_game_at_charsel();
     if (MEM8(GAME_MODE_VA) != GAME_MODE_VERSUS) return 1;
-    if (!in_round && scr == SCRST_VS_SUBMENU) return 1;
-    if (!in_round && MEM8(MENU_PANEL_VA)) return 1;            /* the submenu reached by backing out keeps screen 2 */
-    if (!in_round && scr != SCRST_CHARSEL && scr != SCRST_STAGESEL) {
+    if (!fight && scr == SCRST_VS_SUBMENU) return 1;
+    if (!fight && !sel && scr == SCRST_CHARSEL && MEM8(MENU_PANEL_VA)) return 1;
+    if (!fight && !sel && scr != SCRST_STAGESEL) {
         if (++s_menu_frames > MENU_EXIT_FRAMES) return 1;
     } else {
         s_menu_frames = 0;
@@ -246,7 +259,7 @@ static const np_region k_extra[] = {
     { 0x00878391u, 0x0002u, "screen" },    /* menu screen byte + game mode byte */
     { 0x008783C8u, 0x0001u, "round" },
     { 0x0087D49Du, 0x0001u, "tag" },
-    { 0x0080B55Fu, 0x0001u, "pause" },
+    { PAUSE_VA,    0x0001u, "pause" },
 };
 
 static const np_game_desc k_desc = {

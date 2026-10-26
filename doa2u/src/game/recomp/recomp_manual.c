@@ -274,11 +274,28 @@ void doa2u_apu_deliver_irq(void)
  * Deliver the interrupt from inside the wait; guest registers are preserved. */
 void sub_0036A38C(void)
 {
+    extern volatile int g_apu_det;                /* apu_core.c: a netplay session steps the chip */
+    extern void mcpx_apu_det_step(void);
+    extern void xbox_det_add_filetime_boost(uint64_t);
     uint32_t v = ecx;
+    int steps = 0;
     if (MEM8(v + 0x12) & 1) {
         while (MEM16(v + 0x12) & 0x8000) {
             uint32_t r_eax = eax, r_edx = edx, r_ebx = ebx, r_esi = esi,
                      r_edi = edi, r_esp = esp, r_seh = g_seh_ebp;
+            if (g_apu_det) {
+                /* Online session: chip time only moves when the lockstep frame
+                 * steps it and the session clock only moves with the frame, so
+                 * this wait would never see the voice stop nor its own 500 ms
+                 * timeout (measured 2026-10-26: the first fight of a local
+                 * session hung here). Step one chip frame per iteration (paid
+                 * back from the next lockstep frame, as DOA3's retire wait does),
+                 * and after 750 of them, 500 ms of chip time, move the session
+                 * clock on by that much so the driver's timeout can act. Both
+                 * are counts, identical on the two machines. */
+                mcpx_apu_det_step();
+                if (++steps >= 750) { xbox_det_add_filetime_boost(5000000u); steps = 0; }
+            }
             doa2u_apu_deliver_irq();
             eax = r_eax; edx = r_edx; ebx = r_ebx; esi = r_esi;
             edi = r_edi; esp = r_esp; g_seh_ebp = r_seh;
@@ -286,7 +303,7 @@ void sub_0036A38C(void)
             ecx = v;
             PUSH32(esp, 0);
             sub_00369B74();                 /* keeps the driver's 500 ms timeout */
-            if (MEM16(v + 0x12) & 0x8000) Sleep(1);
+            if (!g_apu_det && (MEM16(v + 0x12) & 0x8000)) Sleep(1);
         }
     }
     ecx = v;

@@ -902,7 +902,14 @@ static void bridge_KeWaitForSingleObject(void)
          * frame and the music stopped reading. The file server keeps
          * finishing all queued I/O inside the frame, so a load completes on
          * the same frame on both machines whatever music was in flight. */
-        if (g_xbox_det_active && xbox_fiber_current_ctx1() == g_xbox_vsync_server_routine)
+        /* The vsync server's routine is not known for DOA2U yet (the global
+         * stays 0), and the primary fiber's context is 0 as well: without the
+         * non-zero test the game thread itself parked on the lockstep key,
+         * which only the game thread's own frame hook wakes (measured
+         * 2026-10-26: first local session hung at the character confirm,
+         * fiber #0 WAITING on 0xDE7FB1A0). */
+        if (g_xbox_det_active && g_xbox_vsync_server_routine &&
+            xbox_fiber_current_ctx1() == g_xbox_vsync_server_routine)
             xbox_fiber_block(XBOX_DET_VBLANK_KEY);
         else if (g_xbox_det_active && (xbox_fiber_is_primary() || xbox_fiber_is_coroutine())) xbox_fiber_run_workers_idle(1024);
         else xbox_fiber_yield();

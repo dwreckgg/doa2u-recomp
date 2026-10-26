@@ -146,10 +146,13 @@ void netplay_diag_frame(void)
         InterlockedExchange(&s_dump_req, 0);
         write_dump();
     }
-    if (s_mirror) {
-        np_pad m;
+    if (s_mirror) {                                         /* same rule as netplay_session.c mirror_pair() */
+        np_pad m, none0 = {0};
+        int owner = np_game_pause_owner();
         np_game_pad_read(0, &m);
-        np_game_pad_write(1, &m, 0x1000u + s_builder_calls);
+        if (owner == 0) np_game_pad_write(1, &none0, 0x1000u + s_builder_calls);
+        else if (owner == 1) { np_game_pad_write(1, &m, 0x1000u + s_builder_calls); np_game_pad_write(0, &none0, 0x1000u + s_builder_calls); }
+        else np_game_pad_write(1, &m, 0x1000u + s_builder_calls);
     }
     rate_log();
     if (s_screens) {

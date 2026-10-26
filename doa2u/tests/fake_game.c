@@ -28,6 +28,7 @@ void fake_game_reset(void)
 {
     memset(&fg, 0, sizeof fg);
     memset(s_mem, 0, sizeof s_mem);
+    fg.pause_owner = -1;
     fg.screen = 1;
     wr32(FG_SEED, 12345u);
 }
@@ -61,6 +62,7 @@ int      np_game_at_charsel(void) { return fg.at_charsel; }
 int      np_game_previews_posed(void) { return fg.posed; }
 int      np_game_is_tag(void) { return fg.tag; }
 int      np_game_in_fight(void) { return fg.in_fight; }
+int      np_game_pause_owner(void) { return fg.pause_owner; }
 uint32_t np_game_screen_key(void) { return fg.screen; }
 int      np_game_left_versus(void) { return fg.left; }
 void     np_game_session_reset(void) { fg.session_resets++; }

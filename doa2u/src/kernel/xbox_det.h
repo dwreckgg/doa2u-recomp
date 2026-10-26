@@ -62,6 +62,11 @@ uint32_t xbox_det_io_count(void);
 
 /* Hot-poll time boost (kernel_bridge QPC) accumulated within the session. */
 void     xbox_det_add_qpc_boost(uint64_t delta);
+/* A guest wait that has used up a span of chip time with no lockstep frame
+ * (DirectSound's voice-off wait, recomp_manual.c): the session clock moves
+ * on by that span, so the driver's own timeout can act. Deterministic: it
+ * is counted in chip steps, not host time. */
+void     xbox_det_add_filetime_boost(uint64_t delta_100ns);
 
 /* Changes on every begin/end, so callers can reset per-session state. */
 uint32_t xbox_det_epoch(void);

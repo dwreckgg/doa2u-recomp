@@ -27,3 +27,23 @@ over the image range `00010000:0106DAE0` unless noted; `show` prints bytes.
 | `SCRST_VA` note | DOA2U has one menu byte (0x878391) where DOA3 had a mode byte and a screen byte; the in-round flag 0x8783C8 plays the part of DOA3's mode 1 | — | the adapter's predicates are written from these two bytes (ruling in the ledger) |
 | `MENU_PANEL_VA` | `0x00806458` (byte; the word at 0x806454 is that panel's tick) | the menu-screen byte 0x878391 keeps 2 after backing out of the character select to the Versus submenu (dumps x_sel 2, x_sub_back 2, x_tag_sub_back 2; it resets to 1 only at the mode menu), so a second signal was needed: classes charsel={x_sel,x_tag_sel,vs_single_a,vs_tag_a,spar_charsel,tag_charsel,vs_entry} rest={13 other dumps} found no single byte or dword; 0x806458 is 1 on the title, profile, mode menu, both submenus (fresh and after backing out), stage selects and fights, and 0 on every character select, the results and Settings | `np_game_at_charsel()` = mode 5, screen 2, not in a round, panel 0; `left_versus` also treats a live panel as the submenu; no direct readers in the generated code (reached through a pointer), so this one rests on the 20 dumps |
 | preview pose note | the bone bank's first row stays 1.0f after leaving the character select (x_sub_back, x_menu_back, x_tag_sel) | `show 875C5C` | the barrier also waits for 10 frames without guest file I/O, which covers a re-entered select's preview load |
+
+## Pause menu (Task 6, 2026-10-26)
+
+| Name | VA | Values | Evidence |
+|---|---|---|---|
+| PAUSE_VA | 0x80B55F | 1 while the pause menu is up, 0 otherwise | dump `pausetest` (paused) 01; every fight dump of Task 4 00 |
+| PAUSE_OWNER_VA | 0x878390 | port whose pause menu it is: 0 = Player 1, 1 = Player 2 | dump `pausetest` (PAUSED PLAYER1) 00; dumps `pause_p2_0/1` (PAUSED PLAYER2) 01; the pause-menu routine sub_000DB42B reads this byte three times |
+
+With the one-controller mirror the mirrored Start press is taken by either pad (observed: Player 1 first, Player 2 on every later pause of the same match). On that menu only the owning pad's input counts; the other pad pressing the same keys makes the game show "Please reconnect the controller to controller port %d" and ignore the menu (reproduced with the mirror request file and no session).
+
+## Fight and character-select flags (Task 6, 2026-10-26)
+
+ROUND_VA (0x8783C8) is sticky after a pause-menu Quit: it stays 1 on the title, mode menu, Versus submenu and character select that follow, so a predicate built on it never sees the character select again. The predicates now use two flags found with `netplay_memdiff classes` over 9 fight dumps (incl. paused) against 5 character-select dumps (incl. the one after a Quit), confirmed on all 44 dumps of the day:
+
+| Name | VA | Values | Evidence |
+|---|---|---|---|
+| SEL_FLAG_VA(p) | 0x852F9F + 0x70·p | 1 while player p's character-select panel is live, else 0 | 1 on every character select (Versus Single/Tag, Sparring, re-entered, after a Quit); 0 on the title, profile, mode menu, submenu, stage select, loads, fights, pause, results, and the first frame of the character select (`vs_entry`) |
+| FIGHT_FLAG_VA | 0x852F45 | 0xFF from the fight intro through the results, 0 otherwise | FF in all fight/pause/late-round dumps and the results; 0 on every menu and character select, including after a Quit |
+
+at_charsel = mode 5 and both SEL flags; in_fight = FIGHT flag 0xFF; screen_key low byte = fight | sel0<<1 | sel1<<2; left_versus uses these instead of the round byte.

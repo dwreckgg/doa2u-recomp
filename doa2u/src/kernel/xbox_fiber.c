@@ -685,7 +685,8 @@ void xbox_fiber_dump(void)
     static const char *S[] = { "FREE", "READY", "RUNNING", "WAITING", "DONE", "DORMANT" };
     fprintf(stderr, "[FIBER-DUMP] %d fibers, cur=%d:\n", g_nfib, g_cur);
     for (int i = 0; i < g_nfib; i++)
-        fprintf(stderr, "   #%d routine=0x%08X state=%s wait_event=0x%08X\n",
-                i, g_fib[i].start_routine, S[g_fib[i].state], g_fib[i].wait_event);
+        fprintf(stderr, "   #%d routine=0x%08X ctx1=0x%08X state=%s wait_event=0x%08X%s\n",
+                i, g_fib[i].start_routine, g_fib[i].ctx1, S[g_fib[i].state], g_fib[i].wait_event,
+                g_fib[i].is_coroutine ? " coroutine" : "");
     fflush(stderr);
 }
