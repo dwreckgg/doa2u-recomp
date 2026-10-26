@@ -6,6 +6,7 @@
  * script can drive them:
  *   netplay_dump.on    dump guest RAM once; the file's text is the tag; deleted after
  *   netplay_mirror.on  while present: port 1 copies port 0 and both are reported connected
+ *   netplay_screens.on while present: log the adapter's screen readings at every change
  * Dumps go to %DOA2U_DUMP_DIR%, else %TEMP%\doa2u_dumps (80 MB each, kept
  * out of the OneDrive folders). With Diag=1 the pad-builder rate is logged
  * every 600 calls.

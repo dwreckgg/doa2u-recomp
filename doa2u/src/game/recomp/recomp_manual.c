@@ -865,6 +865,17 @@ void sub_003352A4(void)
     sub_003352A4_gen();
 }
 
+/* The per-port button layouts live in the profile image (game data +0x1E,
+ * 20 bytes per port) and the game reads them from there: switching the
+ * control scheme in Settings changed those words and nothing else outside
+ * the menu's own widgets (measured 2026-10-26, dumps ctrl_before3 /
+ * ctrl_typeB, data and BSS diffed), so there are no live maps to rebuild
+ * after the session writes a new image. Kept as the hook the session core
+ * calls, in case a later measurement finds a cache. */
+void doa2u_rebuild_button_maps(void)
+{
+}
+
 void sub_003B9E12_gen(void);
 void sub_003B9E12(void)   /* XInputOpen(type, port, slot, params) -> handle, stdcall ret 16 */
 {

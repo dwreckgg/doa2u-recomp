@@ -17,6 +17,7 @@ static int           s_mirror;
 static volatile LONG s_dump_req;
 static char          s_dump_tag[NP_DUMP_TAG + 1];
 static char          s_last_dump[MAX_PATH];
+static int           s_screens;
 
 static void exe_path(const char *name, char *out, size_t cap)
 {
@@ -138,6 +139,7 @@ void netplay_diag_frame(void)
     if ((s_builder_calls & 31) == 0) {                      /* request files, twice a second */
         char tag[64];
         s_mirror = exe_file_exists("netplay_mirror.on");
+        s_screens = exe_file_exists("netplay_screens.on");
         if (exe_file_take("netplay_dump.on", tag, sizeof tag)) netplay_diag_request_dump(tag);
     }
     if (s_dump_req) {
@@ -150,6 +152,17 @@ void netplay_diag_frame(void)
         np_game_pad_write(1, &m, 0x1000u + s_builder_calls);
     }
     rate_log();
+    if (s_screens) {
+        static uint32_t last = 0xFFFFFFFFu;
+        uint32_t key = np_game_screen_key();
+        if (key != last) {
+            last = key;
+            fprintf(stderr, "[netplay] screen %04X charsel=%d posed=%d tag=%d fight=%d (pad-builder call %u)\n",
+                    key, np_game_at_charsel(), np_game_previews_posed(), np_game_is_tag(),
+                    np_game_in_fight(), s_builder_calls);
+            fflush(stderr);
+        }
+    }
 }
 
 uint32_t netplay_diag_forced_pads(void)
