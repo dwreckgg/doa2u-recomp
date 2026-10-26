@@ -3015,6 +3015,16 @@ static int nv_uses_texshader(void)
             for (b = 0; b < 32; b += 8)   /* colour or alpha input (the Safari pond reflection's mask is t1.a) */
                 if (((g_pg_reg[(0x0AC0 >> 2) + i] >> b) & 0xF) == 9 || ((g_pg_reg[(0x0260 >> 2) + i] >> b) & 0xF) == 9) return 1;
     }
+    /* A stage reading factor0/factor1 (Ray House glows: t0 x factor0, 08010000);
+     * the fixed-function path has no constant colour and drew them white. */
+    {
+        int n = (int)(g_pg_reg[0x1E60 >> 2] & 0xFF), b;
+        for (i = 0; i < n && i < 8; i++)
+            for (b = 0; b < 32; b += 8) {
+                uint32_t c = (g_pg_reg[(0x0AC0 >> 2) + i] >> b) & 0xF, a = (g_pg_reg[(0x0260 >> 2) + i] >> b) & 0xF;
+                if (c == 1 || c == 2 || a == 1 || a == 2) return 1;
+            }
+    }
     return 0;
 }
 
