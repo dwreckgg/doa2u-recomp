@@ -9,6 +9,7 @@
 #include <string.h>
 #include <windows.h>
 #include <mmsystem.h>
+#include "../../kernel/perf.h"
 #pragma comment(lib, "winmm.lib")
 
 extern uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
@@ -315,6 +316,7 @@ void sub_0031BBB0(void)
 {
     extern void sub_0031BBB0_gen(void);
     extern void doa2u_movie_select(const char *guest_path);
+    extern int doa2u_movies_enabled(void);
     uint32_t fname = MEM32(esp + 8);
     uint32_t handle = MEM32(esp + 4);
     if (handle) {
@@ -332,7 +334,14 @@ void sub_0031BBB0(void)
         name[i] = 0;
         fprintf(stderr, "[MOVIE] mwPlyStartFname(0x%08X, \"%s\")\n", MEM32(esp + 4), name);
         fflush(stderr);
-        doa2u_movie_select(name);
+        if (doa2u_movies_enabled()) {
+            doa2u_movie_select(name);
+        } else {
+            /* FMV off: no presenter; the vblank pump's host-EOF trigger ends the
+             * guest movie once it reaches PLAYING, the game's own end path. */
+            extern int g_doa2u_host_movie_ended;
+            g_doa2u_host_movie_ended = 1;
+        }
     }
     sub_0031BBB0_gen();
 }
@@ -543,7 +552,9 @@ void sub_00349E80(void)   /* CDevice_KickOff(this = ecx), ret */
     if (dev) {
         uint32_t flags  = MEM32(dev + 8);
         uint32_t cursor = (flags & 4) ? MEM32(dev + 0x770) : MEM32(dev);
+        perf_begin(PERF_TRANSLATE);
         pb_translate_pending(dev, cursor);
+        perf_end(PERF_TRANSLATE);
         pb_run_callbacks();
         MEM32(dev + 0x1C20) = D3D_FAKE_CHANNEL;
         MEM32(D3D_FAKE_CHANNEL + 0x40) = cursor & 0x0FFFFFFFu;   /* DMA_PUT */

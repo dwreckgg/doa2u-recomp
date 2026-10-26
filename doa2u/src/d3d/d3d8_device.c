@@ -20,6 +20,7 @@
 static ID3D11Buffer *g_nv2aff_idx_ring;   /* NV2A FF index ring, see d3d8_DrawNv2aFF */
 static UINT          g_nv2aff_idx_off;
 #include "ui/doa2u_ui.h"
+#include "../kernel/perf.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -125,6 +126,44 @@ void d3d8_DebugDumpTargetState(void)
  * only the host presenter may flip; a non-zero guest count there is the
  * flicker. */
 DWORD g_flip_guest = 0, g_flip_host = 0, g_flip_blocked = 0;
+
+/* FPS counter: frames the game finishes (one per guest Swap), averaged over
+ * 0.5 s windows. Also called for frames dropped while a movie owns the screen. */
+static LARGE_INTEGER g_fs_freq, g_fs_win_start, g_fs_last;
+static int   g_fs_frames;
+static float g_fs_fps;
+
+void d3d8_note_game_frame(void)
+{
+    LARGE_INTEGER now;
+    double win_s;
+    QueryPerformanceCounter(&now);
+    if (!g_fs_freq.QuadPart) {
+        QueryPerformanceFrequency(&g_fs_freq);
+        g_fs_win_start = g_fs_last = now;
+        return;
+    }
+    g_fs_last = now;
+    g_fs_frames++;
+    win_s = (double)(now.QuadPart - g_fs_win_start.QuadPart) / (double)g_fs_freq.QuadPart;
+    if (win_s >= 0.5) {
+        g_fs_fps = (float)(g_fs_frames / win_s);
+        g_fs_frames = 0;
+        g_fs_win_start = now;
+    }
+}
+
+float d3d8_GetGameFPS(void)
+{
+    LARGE_INTEGER now;
+    double since_s;
+    if (!g_fs_freq.QuadPart) return 0.0f;
+    /* No frame for a whole window: the game is stalled, not still at the old rate. */
+    QueryPerformanceCounter(&now);
+    since_s = (double)(now.QuadPart - g_fs_last.QuadPart) / (double)g_fs_freq.QuadPart;
+    return since_s >= 0.5 ? (float)(1.0 / since_s) : g_fs_fps;
+}
+
 void d3d8_PresentFrame(void)
 {
     /* Pump Windows messages */
@@ -667,6 +706,7 @@ static int blit_init(void)
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
     rd.DepthClipEnable = TRUE;
+    rd.ScissorEnable = TRUE;
     if (FAILED(ID3D11Device_CreateRasterizerState(dev, &rd, &g_blit_rs))) return 0;
 
     g_blit_failed = 0;
@@ -735,6 +775,7 @@ static HRESULT d3d8_compose_and_present(void)
     ID3D11DeviceContext *ctx = s->d3d11_context;
     HRESULT hr;
     if (!s->swap_chain || !ctx) return E_FAIL;
+    perf_begin(PERF_COMPOSE);
     d3d8_keep_prev_frame();
 
     swap_resize_if_needed();
@@ -752,6 +793,7 @@ static HRESULT d3d8_compose_and_present(void)
         UINT nsc = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
         const FLOAT black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
         D3D11_VIEWPORT vp;
+        D3D11_RECT clip;
         float dar = (video_get_aspect() == VIDEO_ASPECT_16_9) ? (16.0f / 9.0f) : (4.0f / 3.0f);
         float sw = (float)s->swap_w, sh = (float)s->swap_h;
 
@@ -775,9 +817,25 @@ static HRESULT d3d8_compose_and_present(void)
         vp.TopLeftY = (float)(int)((sh - vp.Height) * 0.5f);
         vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
 
+        /* Zoom one 480p line past each edge to hide the 2D overlays' border gap. */
+        {
+            float lines = (float)(s->height / (unsigned)video_get_scale());
+            float zoom  = lines / (lines - 2.0f);
+            float zw = vp.Width * zoom, zh = vp.Height * zoom;
+            clip.left   = (LONG)vp.TopLeftX;
+            clip.top    = (LONG)vp.TopLeftY;
+            clip.right  = (LONG)(vp.TopLeftX + vp.Width + 0.5f);
+            clip.bottom = (LONG)(vp.TopLeftY + vp.Height + 0.5f);
+            vp.TopLeftX -= (zw - vp.Width) * 0.5f;
+            vp.TopLeftY -= (zh - vp.Height) * 0.5f;
+            vp.Width  = zw;
+            vp.Height = zh;
+        }
+
         ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &s->swap_rtv, NULL);
         ID3D11DeviceContext_ClearRenderTargetView(ctx, s->swap_rtv, black);
         ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
+        ID3D11DeviceContext_RSSetScissorRects(ctx, 1, &clip);
         ID3D11DeviceContext_RSSetState(ctx, g_blit_rs);
         ID3D11DeviceContext_OMSetBlendState(ctx, NULL, NULL, 0xFFFFFFFFu);
         ID3D11DeviceContext_OMSetDepthStencilState(ctx, NULL, 0);
@@ -822,8 +880,11 @@ static HRESULT d3d8_compose_and_present(void)
         if (dsv) ID3D11DepthStencilView_Release(dsv);
     }
 
+    perf_begin(PERF_PRESENT);
     hr = IDXGISwapChain_Present(s->swap_chain, 0, 0);
+    perf_end(PERF_PRESENT);
     d3d8_apply_target_size_change();
+    perf_end(PERF_COMPOSE);
     return hr;
 }
 
@@ -841,6 +902,7 @@ static HRESULT __stdcall dev_Present(IDirect3DDevice8 *self, const RECT *src, co
     static DWORD last_tick = 0;
     (void)self; (void)src; (void)dst; (void)hWnd; (void)pDirty;
 
+    d3d8_note_game_frame();
     frame_count++;
     DWORD now = GetTickCount();
     if (last_tick == 0) last_tick = now;
@@ -904,12 +966,17 @@ static HRESULT __stdcall dev_Present(IDirect3DDevice8 *self, const RECT *src, co
         extern int doa2u_movie_host_owns_screen(void);
         if (doa2u_movie_host_owns_screen()) {
             g_flip_blocked++;
+            if (g_perf_on) perf_frame();
             return S_OK;
         }
     }
     g_flip_guest++;
     /* The overlay is drawn by the compose step, onto the window-sized frame. */
-    return d3d8_compose_and_present();
+    {
+        HRESULT hr = d3d8_compose_and_present();
+        if (g_perf_on) perf_frame();
+        return hr;
+    }
 }
 
 static HRESULT __stdcall dev_GetBackBuffer(IDirect3DDevice8 *self, INT iBackBuffer, DWORD Type, IDirect3DSurface8 **ppSurface)

@@ -26,6 +26,7 @@
 #include "../kernel/kernel.h"
 #include "../kernel/xbox_memory_layout.h"
 #include "../kernel/xbox_fiber.h"
+#include "../kernel/perf.h"
 #include "../d3d/d3d8_xbox.h"
 #include "../audio/dsound_xbox.h"
 #include "recomp/gen/recomp_funcs.h"
@@ -212,12 +213,22 @@ static void doa2u_watchdog_start(void)
 void doa2u_present_frame(void)
 {
     InterlockedIncrement(&g_doa2u_heartbeat);
-    { extern void doa2u_apu_deliver_irq(void); doa2u_apu_deliver_irq(); }
+    {
+        extern void doa2u_apu_deliver_irq(void);
+        perf_begin(PERF_AUDIO);
+        doa2u_apu_deliver_irq();
+        perf_end(PERF_AUDIO);
+    }
     doa2u_pump_messages();
     {
         extern int doa2u_movie_host_owns_screen(void);
-        if (doa2u_movie_host_owns_screen())
-            return;   /* the movie presenter owns the swap chain */
+        extern void d3d8_note_game_frame(void);
+        if (doa2u_movie_host_owns_screen()) {
+            /* the movie presenter owns the swap chain; the game frame still counts */
+            d3d8_note_game_frame();
+            if (g_perf_on) perf_frame();
+            return;
+        }
     }
     if (g_d3d_device)
         g_d3d_device->lpVtbl->Present(g_d3d_device, NULL, NULL, NULL, NULL);
@@ -864,7 +875,8 @@ int main(int argc, char **argv)
         }
     }
     setvbuf(stdout, NULL, _IONBF, 0);
-    doa2u_log_init();   /* stderr -> doa2u_log.txt (Logging=1 in doa2u_settings.ini) */
+    doa2u_log_init();
+    doa2u_perfmon_set_enabled(doa2u_perfmon_enabled());   /* stderr -> doa2u_log.txt (Logging=1 in doa2u_settings.ini) */
 
     atexit(doa2u_atexit);
     SetUnhandledExceptionFilter(doa2u_unhandled);

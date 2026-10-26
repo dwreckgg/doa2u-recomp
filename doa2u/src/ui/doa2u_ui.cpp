@@ -14,6 +14,7 @@ extern "C" {
 #include "video_settings.h"
 #include "log_settings.h"
 #include "profile_settings.h"
+#include "../kernel/perf.h"
 ID3D11RenderTargetView *d3d8_GetPresentRTV(void);
 UINT                    d3d8_GetPresentWidth(void);
 UINT                    d3d8_GetPresentHeight(void);
@@ -25,6 +26,7 @@ UINT                    d3d8_GetBackbufferWidth(void);
 UINT                    d3d8_GetBackbufferHeight(void);
 void                    d3d8_RestoreDefaultTarget(void);
 const char             *doa2u_settings_ini_path(void);
+float                   d3d8_GetGameFPS(void);
 }
 
 /* imgui_impl_win32's message handler, declared in its header. */
@@ -34,6 +36,7 @@ namespace {
 
 bool g_ready   = false;
 bool g_visible = false;
+ImFont *g_fps_font = nullptr;   /* large bold font for the FPS counter */
 
 /* Rebind capture state, mirroring MapperPanel's listening_/armed_ pair. */
 int  g_listening = -1;   /* row capturing a binding, or -1 */
@@ -271,10 +274,17 @@ void DrawGeneralSection()
     switch (ResetSaveRow()) {
     case 1:
         doa2u_log_set_enabled(0);
+        doa2u_movies_set_enabled(1);
+        doa2u_fps_set_enabled(0);
+        doa2u_fps_set_corner(FPS_TOP_LEFT);
+        doa2u_perfmon_set_threshold(20);
+        doa2u_perfmon_set_enabled(0);
         SetStatus("General settings reset to defaults");
         break;
     case 2:
-        SetSaveStatus(doa2u_log_save(), doa2u_settings_ini_path());
+        SetSaveStatus(doa2u_log_save() && doa2u_movies_save() && doa2u_fps_save() &&
+                      doa2u_perfmon_save(),
+                      doa2u_settings_ini_path());
         break;
     }
 
@@ -283,6 +293,37 @@ void DrawGeneralSection()
     bool on = doa2u_log_enabled() != 0;
     if (ImGui::Checkbox("Write log files", &on))
         doa2u_log_set_enabled(on ? 1 : 0);
+
+    bool no_fmv = doa2u_movies_enabled() == 0;
+    if (ImGui::Checkbox("Disable FMV playback", &no_fmv))
+        doa2u_movies_set_enabled(no_fmv ? 0 : 1);
+
+    static const char *kCorner[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
+    bool fps = doa2u_fps_enabled() != 0;
+    if (ImGui::Checkbox("Show FPS counter", &fps))
+        doa2u_fps_set_enabled(fps ? 1 : 0);
+    ImGui::SameLine();
+    if (!fps) ImGui::BeginDisabled();
+    int corner = doa2u_fps_corner();
+    ImGui::SetNextItemWidth(140.0f);
+    if (ImGui::Combo("##fps_corner", &corner, kCorner, IM_ARRAYSIZE(kCorner)))
+        doa2u_fps_set_corner(corner);
+    if (!fps) ImGui::EndDisabled();
+
+    bool perfmon = doa2u_perfmon_enabled() != 0;
+    if (ImGui::Checkbox("Performance monitor", &perfmon))
+        doa2u_perfmon_set_enabled(perfmon ? 1 : 0);
+    ImGui::SameLine();
+    if (!perfmon) ImGui::BeginDisabled();
+    /* Applied when editing ends, so typing "35" does not apply 3 first. */
+    static int s_threshold;
+    static bool s_editing;
+    if (!s_editing) s_threshold = doa2u_perfmon_threshold();
+    ImGui::SetNextItemWidth(60.0f);
+    ImGui::InputInt("ms##perf_threshold", &s_threshold, 0, 0);
+    s_editing = ImGui::IsItemActive();
+    if (ImGui::IsItemDeactivatedAfterEdit()) doa2u_perfmon_set_threshold(s_threshold);
+    if (!perfmon) ImGui::EndDisabled();
 
     /* Quit centred above the bottom edge. */
     const float gap = 24.0f;
@@ -321,6 +362,109 @@ void DrawProfileSection()
         profile_set_language(lang ? PROFILE_LANG_JAPANESE : PROFILE_LANG_ENGLISH);
 }
 
+void DrawFpsCounter()
+{
+    char text[16];
+    _snprintf_s(text, sizeof(text), _TRUNCATE, "%.0f", d3d8_GetGameFPS());
+
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    ImFont *font = g_fps_font ? g_fps_font : ImGui::GetFont();
+    float size = vp->WorkSize.y * 0.045f;
+    if (size < 24.0f) size = 24.0f;
+    float pad = size * 0.4f;
+    ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+
+    int c = doa2u_fps_corner();
+    bool right = c == FPS_TOP_RIGHT || c == FPS_BOTTOM_RIGHT;
+    bool bottom = c == FPS_BOTTOM_LEFT || c == FPS_BOTTOM_RIGHT;
+    ImVec2 pos(right  ? vp->WorkPos.x + vp->WorkSize.x - pad - ts.x : vp->WorkPos.x + pad,
+               bottom ? vp->WorkPos.y + vp->WorkSize.y - pad - ts.y : vp->WorkPos.y + pad);
+
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    const ImU32 outline = IM_COL32(0, 0, 0, 255);
+    float o = size / 16.0f;
+    for (int dx = -1; dx <= 1; ++dx)
+        for (int dy = -1; dy <= 1; ++dy)
+            if (dx || dy) dl->AddText(font, size, ImVec2(pos.x + dx * o, pos.y + dy * o), outline, text);
+    dl->AddText(font, size, pos, IM_COL32(255, 255, 0, 255), text);
+}
+
+/* Stacked frame time per subsystem for the last PERF_HISTORY frames, under the menu. */
+void DrawPerfGraph(ImVec2 menu_pos, ImVec2 menu_size)
+{
+    static const ImU32 kColor[PERF_COUNT] = {
+        IM_COL32(110, 130, 160, 255),   /* game logic */
+        IM_COL32(240, 150,  40, 255),   /* GPU command translation */
+        IM_COL32(220,  60,  60, 255),   /* draw submission */
+        IM_COL32(240, 220,  60, 255),   /* texture conversion */
+        IM_COL32( 80, 200,  90, 255),   /* streaming/decode */
+        IM_COL32( 70, 200, 220, 255),   /* audio interrupt */
+        IM_COL32(160, 100, 220, 255),   /* compose */
+        IM_COL32(230, 100, 180, 255),   /* present wait */
+    };
+    static float s_frames[PERF_HISTORY][PERF_COUNT];
+    int n = perf_history(s_frames, PERF_HISTORY);
+
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    const float h = 250.0f;
+    float y = menu_pos.y + menu_size.y + 8.0f;
+    if (y + h > vp->WorkPos.y + vp->WorkSize.y) y = vp->WorkPos.y + vp->WorkSize.y - h;
+    ImGui::SetNextWindowPos(ImVec2(menu_pos.x, y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(menu_size.x, h), ImGuiCond_Always);
+    if (ImGui::Begin("Performance", nullptr,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+        float scale_ms = 1000.0f / 30.0f;   /* two frames of headroom, more if needed */
+        for (int i = 0; i < n; ++i) {
+            float t = 0.0f;
+            for (int p = 0; p < PERF_COUNT; ++p) t += s_frames[i][p];
+            if (t > scale_ms) scale_ms = t;
+        }
+
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        ImVec2 o = ImGui::GetCursorScreenPos();
+        float w = ImGui::GetContentRegionAvail().x, ph = 150.0f;
+        float bar = w / (float)PERF_HISTORY;
+        dl->AddRectFilled(o, ImVec2(o.x + w, o.y + ph), IM_COL32(20, 20, 24, 255));
+        for (int i = 0; i < n; ++i) {
+            float x0 = o.x + w - (float)(n - i) * bar, x1 = x0 + (bar > 1.0f ? bar - 0.5f : bar);
+            float base = o.y + ph;
+            for (int p = 0; p < PERF_COUNT; ++p) {
+                float hh = s_frames[i][p] / scale_ms * ph;
+                if (hh <= 0.0f) continue;
+                dl->AddRectFilled(ImVec2(x0, base - hh), ImVec2(x1, base), kColor[p]);
+                base -= hh;
+            }
+        }
+        float budget = o.y + ph - (1000.0f / 60.0f) / scale_ms * ph;
+        dl->AddLine(ImVec2(o.x, budget), ImVec2(o.x + w, budget), IM_COL32(255, 255, 255, 200));
+        dl->AddText(ImVec2(o.x + 4.0f, budget - ImGui::GetTextLineHeight()), IM_COL32(255, 255, 255, 220), "16.7 ms");
+        char top[32];
+        _snprintf_s(top, sizeof(top), _TRUNCATE, "%.0f ms", scale_ms);
+        dl->AddText(ImVec2(o.x + 4.0f, o.y + 2.0f), IM_COL32(200, 200, 200, 220), top);
+        ImGui::Dummy(ImVec2(w, ph + 4.0f));
+
+        /* Colour key. */
+        float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+        for (int p = 0; p < PERF_COUNT; ++p) {
+            const char *name = perf_part_name(p);
+            float item = ImGui::GetTextLineHeight() + 4.0f + ImGui::CalcTextSize(name).x;
+            if (p > 0) {
+                ImGui::SameLine(0.0f, 14.0f);
+                if (ImGui::GetCursorPosX() + item > right) ImGui::NewLine();
+            }
+            ImVec2 c = ImGui::GetCursorScreenPos();
+            float s = ImGui::GetTextLineHeight();
+            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(c.x, c.y + 2.0f),
+                                                      ImVec2(c.x + s - 4.0f, c.y + s - 2.0f), kColor[p]);
+            ImGui::Dummy(ImVec2(s, s));
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::TextUnformatted(name);
+        }
+    }
+    ImGui::End();
+}
+
 void DrawMenu()
 {
     const ImGuiViewport *vp = ImGui::GetMainViewport();
@@ -336,6 +480,10 @@ void DrawMenu()
     bool open = true;
     if (ImGui::Begin("Dead or Alive 2 Ultimate", &open, ImGuiWindowFlags_NoCollapse)) {
         if (ImGui::BeginTabBar("##tabs")) {
+            if (ImGui::BeginTabItem("General")) {
+                DrawGeneralSection();
+                ImGui::EndTabItem();
+            }
             if (ImGui::BeginTabItem("Controls")) {
                 DrawControlsSection();
                 ImGui::EndTabItem();
@@ -348,15 +496,14 @@ void DrawMenu()
                 DrawProfileSection();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("General")) {
-                DrawGeneralSection();
-                ImGui::EndTabItem();
-            }
 
             ImGui::EndTabBar();
         }
     }
+    ImVec2 menu_pos = ImGui::GetWindowPos(), menu_size = ImGui::GetWindowSize();
     ImGui::End();
+
+    if (doa2u_perfmon_enabled()) DrawPerfGraph(menu_pos, menu_size);
 
     if (!open) {
         g_visible = false;
@@ -390,6 +537,17 @@ extern "C" int doa2u_ui_init(void)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     ImGui::StyleColorsDark();
 
+    /* Default font stays first (the menu); a bold system font for the FPS
+     * counter, falling back to the default scaled up if it is not installed. */
+    io.Fonts->AddFontDefault();
+    char font_path[MAX_PATH];
+    UINT n = GetWindowsDirectoryA(font_path, MAX_PATH);
+    if (n && n < MAX_PATH - 32) {
+        strcat_s(font_path, sizeof(font_path), "\\Fonts\\arialbd.ttf");
+        if (GetFileAttributesA(font_path) != INVALID_FILE_ATTRIBUTES)
+            g_fps_font = io.Fonts->AddFontFromFileTTF(font_path, 64.0f);
+    }
+
     if (!ImGui_ImplWin32_Init(hwnd)) { ImGui::DestroyContext(); return 0; }
     if (!ImGui_ImplDX11_Init(dev, ctx)) {
         ImGui_ImplWin32_Shutdown();
@@ -405,6 +563,7 @@ extern "C" void doa2u_ui_shutdown(void)
 {
     if (!g_ready) return;
     g_ready = false;
+    g_fps_font = nullptr;
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
@@ -471,8 +630,9 @@ extern "C" int doa2u_ui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 extern "C" void doa2u_ui_render(void)
 {
-    /* Nothing to do on a normal frame unless the menu is open. */
-    if (!g_visible) return;
+    /* Nothing to do on a normal frame unless the menu is open or the FPS
+     * counter is on. */
+    if (!g_visible && !doa2u_fps_enabled()) return;
     if (!g_ready && !doa2u_ui_init()) return;
 
     ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
@@ -492,7 +652,8 @@ extern "C" void doa2u_ui_render(void)
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    DrawMenu();
+    if (doa2u_fps_enabled()) DrawFpsCounter();
+    if (g_visible) DrawMenu();
 
     ImGui::Render();
 
