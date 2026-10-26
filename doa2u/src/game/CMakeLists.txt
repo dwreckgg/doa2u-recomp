@@ -111,3 +111,6 @@ endfunction()
 
 set(ONLINE_DIR ${CMAKE_SOURCE_DIR}/src/online)
 doa2u_host_test(netplay_format_test ${ONLINE_DIR}/netplay_format.c ${CMAKE_SOURCE_DIR}/tests/netplay_format_test.c)
+doa2u_host_test(online_settings_test ${ONLINE_DIR}/online_settings.c ${CMAKE_SOURCE_DIR}/tests/online_settings_test.c)
+doa2u_host_test(netplay_dump_test ${ONLINE_DIR}/netplay_dump.c ${CMAKE_SOURCE_DIR}/tests/netplay_dump_test.c)
+doa2u_host_test(netplay_memdiff ${ONLINE_DIR}/netplay_dump.c ${CMAKE_SOURCE_DIR}/tests/netplay_memdiff.c)
