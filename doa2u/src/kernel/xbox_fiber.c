@@ -5,6 +5,7 @@
 /* CRI watchdog thread routine that never needs a slice; 0 = none. */
 uint32_t g_xbox_cri_watchdog_routine = 0;
 #include "xbox_memory_layout.h"          /* xbox_HeapAlloc */
+#include "perf.h"
 
 #include <windows.h>
 #include <stdio.h>
@@ -102,6 +103,14 @@ static void load_regs(Fiber *f)
     xbox_xmm_load(f->r_xmm);
 }
 
+/* Every switch goes through here so the performance monitor can count time in
+ * worker fibers (not the primary, not a game task) as streaming/decode. */
+static void switch_to(int i)
+{
+    perf_fiber(i != 0 && !g_fib[i].is_coroutine);
+    SwitchToFiber(g_fib[i].handle);
+}
+
 /* Next runnable (READY) fiber after `from`, round-robin. -1 if none. */
 /* Post-movie only: the movie phase relies on the older round-robin resumption of
  * game tasks (a task waits for the movie by yielding, and the primary must run
@@ -149,7 +158,7 @@ static void CALLBACK fiber_trampoline(LPVOID p)
             g_cur = r;
             if (g_fib[r].state != FIB_WAITING) g_fib[r].state = FIB_RUNNING;
             load_regs(&g_fib[r]);
-            SwitchToFiber(g_fib[r].handle);
+            switch_to(r);
         }
     }
 
@@ -161,7 +170,7 @@ static void CALLBACK fiber_trampoline(LPVOID p)
         int n = pick_next(g_cur);
         if (n < 0) n = 0;                     /* fall back to the primary fiber */
         g_cur = n; g_fib[n].state = FIB_RUNNING; load_regs(&g_fib[n]);
-        SwitchToFiber(g_fib[n].handle);
+        switch_to(n);
     }
 }
 
@@ -304,7 +313,7 @@ void xbox_fiber_yield(void)
     save_regs(&g_fib[me]);
     if (g_fib[me].state == FIB_RUNNING) g_fib[me].state = FIB_READY;
     g_cur = n; g_fib[n].state = FIB_RUNNING; load_regs(&g_fib[n]);
-    SwitchToFiber(g_fib[n].handle);
+    switch_to(n);
     /* Resumed: the switcher already restored our register-globals. */
     g_cur = me; g_fib[me].state = FIB_RUNNING;
 }
@@ -406,7 +415,7 @@ void xbox_fiber_block(uint32_t event_va)
         if (n < 0) { g_fib[me].state = FIB_RUNNING; g_fib[me].wait_event = 0; return; }
     }
     g_cur = n; g_fib[n].state = FIB_RUNNING; load_regs(&g_fib[n]);
-    SwitchToFiber(g_fib[n].handle);
+    switch_to(n);
     /* Woken: the switcher restored our register-globals. */
     g_cur = me; g_fib[me].state = FIB_RUNNING; g_fib[me].wait_event = 0;
 }
@@ -453,7 +462,7 @@ void xbox_fiber_exit(void)
     }
     if (n < 0) n = 0;                         /* fall back to the primary fiber */
     g_cur = n; g_fib[n].state = FIB_RUNNING; load_regs(&g_fib[n]);
-    SwitchToFiber(g_fib[n].handle);
+    switch_to(n);
     /* never reached */
 }
 
@@ -506,7 +515,7 @@ int xbox_fiber_run_thread(uint32_t xhandle)
         if (g_fib[me].state == FIB_RUNNING) g_fib[me].state = FIB_READY;
         g_direct_return = me;
         g_cur = i; f->state = FIB_RUNNING; load_regs(f);
-        SwitchToFiber(f->handle);
+        switch_to(i);
         /* target parked; the direct-return path switched back to us */
         g_cur = me; g_fib[me].state = FIB_RUNNING;
         g_direct_return = -1;
@@ -639,7 +648,7 @@ void xbox_fiber_yield_back(void)
     g_cur = r;
     g_fib[r].state = FIB_RUNNING;
     load_regs(&g_fib[r]);
-    SwitchToFiber(g_fib[r].handle);
+    switch_to(r);
     /* Resumed (switched back into this task). */
     g_cur = self;
     g_fib[self].state = FIB_RUNNING;
@@ -657,7 +666,7 @@ void xbox_fiber_switch_direct(int idx)
     g_cur = idx;
     t->state = FIB_RUNNING;
     load_regs(t);
-    SwitchToFiber(t->handle);
+    switch_to(idx);
     /* Switched back: our registers were restored by whoever resumed us. */
     g_cur = me;
     g_fib[me].state = FIB_RUNNING;

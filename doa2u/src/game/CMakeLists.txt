@@ -24,6 +24,7 @@ set(NV2A_SOURCES
 set(GAME_SOURCES
     main.c
     movie_present.c
+    xiso_extract.c           # first-run install of the game files from a disc image
     ${CMAKE_SOURCE_DIR}/src/ui/video_settings.c
     ${CMAKE_SOURCE_DIR}/src/ui/log_settings.c
     ${CMAKE_SOURCE_DIR}/src/ui/profile_settings.c
@@ -78,7 +79,7 @@ if(MSVC)
     target_link_options(doa2u PRIVATE
         /DYNAMICBASE:NO
         /FIXED:NO
-        /MAP
+        $<$<CONFIG:Debug>:/MAP>
         $<$<CONFIG:Debug>:/DEBUG>
         $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS>
         $<$<CONFIG:Release>:/ENTRY:mainCRTStartup>

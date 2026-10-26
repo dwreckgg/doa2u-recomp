@@ -1,0 +1,13 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Dead or Alive 2 Ultimate",
+  "wikidata": "Q3020568",
+  "system": "Xbox",
+  "type": "recomp",
+  "status": "in-progress",
+  "targets": ["Windows"],
+  "toolchain": "xboxrecomp",
+  "original": {
+    "region": "USA"
+  }
+}

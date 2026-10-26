@@ -24,6 +24,7 @@
 #include "../d3d/d3d8_swizzle.h"
 #include "nv2a_vertex_program.h"
 #include "../d3d/d3d8_nv2aff.h"
+#include "../kernel/perf.h"
 extern IDirect3DDevice8 *xbox_GetD3DDevice(void);
 
 /* Global.txd texture lookup */
@@ -1963,7 +1964,9 @@ static void nv_apply_draw_state(IDirect3DDevice8 *dev, const NvDrawSummary *sum,
                 }
             }
         }
+        perf_begin(PERF_TEXTURE);
         dtex = get_dynamic_texture(dev);
+        perf_end(PERF_TEXTURE);
         /* DOA2U: a 2D draw whose texture stage is DISABLED is flat colour,
          * whatever its vertex layout carries. The fight UI submits its
          * health-bar fills, the pause menu's highlight bar and title box
@@ -3014,6 +3017,16 @@ static int nv_uses_texshader(void)
         for (i = 1; i < n && i < 8; i++)
             for (b = 0; b < 32; b += 8)   /* colour or alpha input (the Safari pond reflection's mask is t1.a) */
                 if (((g_pg_reg[(0x0AC0 >> 2) + i] >> b) & 0xF) == 9 || ((g_pg_reg[(0x0260 >> 2) + i] >> b) & 0xF) == 9) return 1;
+    }
+    /* A stage reading factor0/factor1 (Ray House glows: t0 x factor0, 08010000);
+     * the fixed-function path has no constant colour and drew them white. */
+    {
+        int n = (int)(g_pg_reg[0x1E60 >> 2] & 0xFF), b;
+        for (i = 0; i < n && i < 8; i++)
+            for (b = 0; b < 32; b += 8) {
+                uint32_t c = (g_pg_reg[(0x0AC0 >> 2) + i] >> b) & 0xF, a = (g_pg_reg[(0x0260 >> 2) + i] >> b) & 0xF;
+                if (c == 1 || c == 2 || a == 1 || a == 2) return 1;
+            }
     }
     return 0;
 }
@@ -4364,7 +4377,9 @@ int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param)
         if (param == 0) {
             /* END: submit accumulated vertices */
             if (g_pg.in_draw) {
+                perf_begin(PERF_DRAW);
                 submit_draw();
+                perf_end(PERF_DRAW);
                 g_pg.in_draw = 0;
             }
         } else {
@@ -4783,7 +4798,9 @@ void pgraph_diag_dump_ignored(void)
 void pgraph_d3d11_flush(void)
 {
     if (g_pg.in_draw) {
+        perf_begin(PERF_DRAW);
         submit_draw();
+        perf_end(PERF_DRAW);
         g_pg.in_draw = 0;
     }
     g_pg.stats.frames++;

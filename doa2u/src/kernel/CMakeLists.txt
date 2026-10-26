@@ -24,6 +24,7 @@ set(KERNEL_SOURCES
     kernel_thunks.c
     kernel_bridge.c
     xbox_fiber.c
+    perf.c
     xbox_memory_layout.c
     xbox_det.c
 )

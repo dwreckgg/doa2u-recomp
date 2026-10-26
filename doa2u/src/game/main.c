@@ -26,6 +26,7 @@
 #include "../kernel/kernel.h"
 #include "../kernel/xbox_memory_layout.h"
 #include "../kernel/xbox_fiber.h"
+#include "../kernel/perf.h"
 #include "../d3d/d3d8_xbox.h"
 #include "../audio/dsound_xbox.h"
 #include "recomp/gen/recomp_funcs.h"
@@ -33,6 +34,8 @@
 #include "../ui/video_settings.h"
 #include "../ui/log_settings.h"
 #include "ui/doa2u_ui.h"
+#include "ui/doa2u_setup.h"
+#include "xiso_extract.h"
 
 #define DOA2U_ENTRY_POINT  0x002BBB93
 /* Game files live in assets next to the exe (the disc root); D: maps to assets. */
@@ -47,8 +50,10 @@ static LRESULT CALLBACK doa2u_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     if (m == WM_CLOSE)   { DestroyWindow(h); return 0; }
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    if (m == WM_DEVICECHANGE) { extern void xbox_InputDevicesChanged(void); xbox_InputDevicesChanged(); }
     /* The Esc overlay gets first refusal on input: it opens/closes itself and,
      * while visible, keeps keyboard and mouse out of the game. */
+    if (doa2u_setup_wndproc(h, m, w, l)) return 0;   /* first-run setup screen */
     if (doa2u_ui_wndproc(h, m, w, l)) return 0;
     return DefWindowProcA(h, m, w, l);
 }
@@ -87,7 +92,8 @@ static int doa2u_init_graphics(void)
 
     video_settings_load();
     video_guest_target_size(video_get_aspect(), &gw, &gh);
-    g_hwnd = doa2u_create_window();
+    if (!g_hwnd)   /* the first-run setup screen may already have made it */
+        g_hwnd = doa2u_create_window();
     if (!g_hwnd) { fprintf(stderr, "WARNING: window creation failed\n"); }
 
     g_d3d8 = xbox_Direct3DCreate8(0);
@@ -211,12 +217,22 @@ static void doa2u_watchdog_start(void)
 void doa2u_present_frame(void)
 {
     InterlockedIncrement(&g_doa2u_heartbeat);
-    { extern void doa2u_apu_deliver_irq(void); doa2u_apu_deliver_irq(); }
+    {
+        extern void doa2u_apu_deliver_irq(void);
+        perf_begin(PERF_AUDIO);
+        doa2u_apu_deliver_irq();
+        perf_end(PERF_AUDIO);
+    }
     doa2u_pump_messages();
     {
         extern int doa2u_movie_host_owns_screen(void);
-        if (doa2u_movie_host_owns_screen())
-            return;   /* the movie presenter owns the swap chain */
+        extern void d3d8_note_game_frame(void);
+        if (doa2u_movie_host_owns_screen()) {
+            /* the movie presenter owns the swap chain; the game frame still counts */
+            d3d8_note_game_frame();
+            if (g_perf_on) perf_frame();
+            return;
+        }
     }
     if (g_d3d_device)
         g_d3d_device->lpVtbl->Present(g_d3d_device, NULL, NULL, NULL, NULL);
@@ -852,6 +868,7 @@ static LONG WINAPI doa2u_unhandled(PEXCEPTION_POINTERS info)
 int main(int argc, char **argv)
 {
     void *xbe_data = NULL; size_t xbe_size = 0;
+    WCHAR assets_dir[MAX_PATH] = L"assets";
     (void)argc; (void)argv;
     doa2u_watchdog_start();
     {   /* Run from the exe's folder whatever the launcher's working directory. */
@@ -859,11 +876,19 @@ int main(int argc, char **argv)
         DWORD n = GetModuleFileNameW(NULL, exedir, MAX_PATH);
         if (n > 0 && n < MAX_PATH) {
             WCHAR *slash = wcsrchr(exedir, L'\\');
-            if (slash) { *slash = 0; SetCurrentDirectoryW(exedir); }
+            if (slash) {
+                /* The exe Check for Updates renamed out of the way. */
+                WCHAR old[MAX_PATH];
+                if (swprintf_s(old, MAX_PATH, L"%s.old", exedir) > 0) DeleteFileW(old);
+                *slash = 0;
+                SetCurrentDirectoryW(exedir);
+                swprintf_s(assets_dir, MAX_PATH, L"%s\\assets", exedir);
+            }
         }
     }
     setvbuf(stdout, NULL, _IONBF, 0);
-    doa2u_log_init();   /* stderr -> doa2u_log.txt (Logging=1 in doa2u_settings.ini) */
+    doa2u_log_init();
+    doa2u_perfmon_set_enabled(doa2u_perfmon_enabled());   /* stderr -> doa2u_log.txt (Logging=1 in doa2u_settings.ini) */
 
     atexit(doa2u_atexit);
     SetUnhandledExceptionFilter(doa2u_unhandled);
@@ -871,6 +896,19 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "=== Dead or Alive 2 Ultimate - Static Recompilation ===\n");
     AddVectoredExceptionHandler(1, crash_veh);
+
+    /* First run (or a damaged install): ask for the disc image and extract it
+     * into assets before anything reads from there. */
+    if (!xiso_assets_ready(assets_dir)) {
+        fprintf(stderr, "[SETUP] game files missing from %S, showing setup screen\n", assets_dir);
+        video_settings_load();
+        g_hwnd = doa2u_create_window();
+        if (!doa2u_setup_run(g_hwnd, assets_dir)) {
+            fprintf(stderr, "[EXIT] setup closed without installing the game files\n");
+            return 0;
+        }
+        fprintf(stderr, "[SETUP] game files installed\n");
+    }
 
     if (!load_xbe(DOA2U_XBE_PATH, &xbe_data, &xbe_size)) {
         char cwd[MAX_PATH] = {0}, msg[512];

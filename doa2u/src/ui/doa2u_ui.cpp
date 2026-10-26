@@ -8,6 +8,12 @@
 #include <xinput.h>
 #include <stdio.h>
 #include <string.h>
+#include <winhttp.h>
+#include "miniz.h"
+
+#include <atomic>
+#include <string>
+#include <thread>
 
 extern "C" {
 #include "pad_mapping.h"
@@ -15,6 +21,7 @@ extern "C" {
 #include "log_settings.h"
 #include "profile_settings.h"
 #include "unlockables.h"
+#include "../kernel/perf.h"
 ID3D11RenderTargetView *d3d8_GetPresentRTV(void);
 UINT                    d3d8_GetPresentWidth(void);
 UINT                    d3d8_GetPresentHeight(void);
@@ -26,6 +33,7 @@ UINT                    d3d8_GetBackbufferWidth(void);
 UINT                    d3d8_GetBackbufferHeight(void);
 void                    d3d8_RestoreDefaultTarget(void);
 const char             *doa2u_settings_ini_path(void);
+float                   d3d8_GetGameFPS(void);
 }
 
 /* imgui_impl_win32's message handler, declared in its header. */
@@ -35,6 +43,7 @@ namespace {
 
 bool g_ready   = false;
 bool g_visible = false;
+ImFont *g_fps_font = nullptr;   /* large bold font for the FPS counter */
 
 /* Rebind capture state, mirroring MapperPanel's listening_/armed_ pair. */
 int  g_listening = -1;   /* row capturing a binding, or -1 */
@@ -44,6 +53,17 @@ int  g_pending_vk = 0;    /* VK grabbed by the wndproc while listening */
 char g_status[128] = { 0 };
 
 void SetStatus(const char *s) { _snprintf_s(g_status, sizeof(g_status), _TRUNCATE, "%s", s); }
+
+/* Re-run WM_SETCURSOR now so the cursor shows/hides without waiting for a mouse move. */
+void RefreshCursor()
+{
+    HWND hwnd = d3d8_GetHWND();
+    POINT pt;
+    RECT rc;
+    if (!hwnd || !GetCursorPos(&pt) || !ScreenToClient(hwnd, &pt) || !GetClientRect(hwnd, &rc)) return;
+    if (PtInRect(&rc, pt))
+        SendMessageA(hwnd, WM_SETCURSOR, (WPARAM)hwnd, MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+}
 
 /* "Saved <file>" / "Could not write <file>", naming the file without its folder. */
 void SetSaveStatus(int ok, const char *path)
@@ -69,8 +89,8 @@ bool CaptureBinding(PadBinding &out)
     }
 
     XINPUT_STATE xi;
-    for (DWORD port = 0; port < 4; ++port) {
-        if (XInputGetState(port, &xi) != ERROR_SUCCESS) continue;
+    for (DWORD pad = 0; pad < XBOX_INPUT_HOST_PADS; ++pad) {
+        if (!xbox_InputReadHostPad(pad, &xi)) continue;
 
         static const int kButtons[] = {
             XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
@@ -254,6 +274,135 @@ void DrawVideoSection()
         video_set_scale(sc + 1);
 }
 
+/* ── Check for Updates ────────────────────────────────────────────────────
+ * Compares the latest GitHub release tag against this build's version and,
+ * if it is higher, downloads the release zip and swaps DOA2U.exe in place. */
+
+std::atomic<bool> g_upd_busy{ false };
+char g_upd_msg[256] = { 0 };
+
+void UpdMsg(const char *s) { _snprintf_s(g_upd_msg, sizeof(g_upd_msg), _TRUNCATE, "%s", s); }
+
+bool HttpGet(const std::wstring &url, std::string *out)
+{
+    URL_COMPONENTS uc = { sizeof(uc) };
+    wchar_t host[256], path[2048];
+    uc.lpszHostName = host; uc.dwHostNameLength = 256;
+    uc.lpszUrlPath  = path; uc.dwUrlPathLength  = 2048;
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) return false;
+    if (uc.dwExtraInfoLength) wcsncat_s(path, uc.lpszExtraInfo, uc.dwExtraInfoLength);
+
+    bool ok = false;
+    HINTERNET s = WinHttpOpen(L"DOA2U", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    HINTERNET c = s ? WinHttpConnect(s, host, uc.nPort, 0) : NULL;
+    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", path, NULL, WINHTTP_NO_REFERER,
+                                         WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : NULL;
+    if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(r, NULL)) {
+        DWORD status = 0, sz = sizeof(status);
+        WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
+        ok = status == 200;
+        char buf[65536];
+        DWORD got = 0;
+        while (ok && WinHttpReadData(r, buf, sizeof(buf), &got) && got)
+            out->append(buf, got);
+    }
+    if (r) WinHttpCloseHandle(r);
+    if (c) WinHttpCloseHandle(c);
+    if (s) WinHttpCloseHandle(s);
+    return ok;
+}
+
+/* The string after "key": in the release JSON, searching from `at`. */
+std::string JsonStr(const std::string &js, const char *key, size_t *at)
+{
+    size_t p = js.find(std::string("\"") + key + "\"", *at);
+    if (p == std::string::npos || (p = js.find('"', js.find(':', p) + 1)) == std::string::npos) return "";
+    size_t e = js.find('"', p + 1);
+    *at = e;
+    return js.substr(p + 1, e - p - 1);
+}
+
+bool VersionHigher(const char *remote, const char *local)
+{
+    int r[3] = { 0 }, l[3] = { 0 };
+    sscanf_s(remote + (*remote == 'v'), "%d.%d.%d", &r[0], &r[1], &r[2]);
+    sscanf_s(local, "%d.%d.%d", &l[0], &l[1], &l[2]);
+    for (int i = 0; i < 3; ++i)
+        if (r[i] != l[i]) return r[i] > l[i];
+    return false;
+}
+
+void CheckForUpdates()
+{
+    std::string js;
+    size_t at = 0;
+    if (!HttpGet(L"https://api.github.com/repos/parkerallan/doa2u-recomp/releases/latest", &js)) {
+        UpdMsg("Could not reach GitHub");
+        return;
+    }
+    std::string tag = JsonStr(js, "tag_name", &at);
+    if (tag.empty()) { UpdMsg("No release found"); return; }
+    char msg[256];
+    if (!VersionHigher(tag.c_str(), DOA2U_VERSION_STRING)) {
+        _snprintf_s(msg, sizeof(msg), _TRUNCATE, "Already on the latest version (v%s)", DOA2U_VERSION_STRING);
+        UpdMsg(msg);
+        return;
+    }
+
+    std::string url;
+    at = 0;
+    while (!(url = JsonStr(js, "browser_download_url", &at)).empty())
+        if (url.size() > 4 && url.compare(url.size() - 4, 4, ".zip") == 0) break;
+    if (url.empty()) { UpdMsg("The release has no download"); return; }
+
+    _snprintf_s(msg, sizeof(msg), _TRUNCATE, "Downloading %s...", tag.c_str());
+    UpdMsg(msg);
+
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(NULL, exe, MAX_PATH);
+    std::wstring exe_path = exe;
+    std::wstring fresh = exe_path + L".new";
+    std::wstring old = exe_path + L".old";
+
+    /* Download the zip into memory and pull DOA2U.exe out of it. */
+    std::string zip;
+    bool ok = HttpGet(std::wstring(url.begin(), url.end()), &zip);
+    if (ok) {
+        mz_zip_archive za = {};
+        size_t size = 0;
+        void *data = NULL;
+        if (mz_zip_reader_init_mem(&za, zip.data(), zip.size(), 0)) {
+            data = mz_zip_reader_extract_file_to_heap(&za, "DOA2U.exe", &size, 0);
+            mz_zip_reader_end(&za);
+        }
+        DWORD wr = 0;
+        HANDLE f = data ? CreateFileW(fresh.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)
+                        : INVALID_HANDLE_VALUE;
+        ok = f != INVALID_HANDLE_VALUE && WriteFile(f, data, (DWORD)size, &wr, NULL) && wr == size;
+        if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+        mz_free(data);
+    }
+
+    /* The running exe cannot be overwritten, but it can be renamed. The
+     * renamed one is deleted when the game next starts (main.c). */
+    if (ok) {
+        DeleteFileW(old.c_str());
+        ok = MoveFileExW(exe_path.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+        if (ok && !MoveFileExW(fresh.c_str(), exe_path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            MoveFileExW(old.c_str(), exe_path.c_str(), MOVEFILE_REPLACE_EXISTING);
+            ok = false;
+        }
+    }
+    DeleteFileW(fresh.c_str());
+
+    _snprintf_s(msg, sizeof(msg), _TRUNCATE,
+                ok ? "Updated to %s. Restart the game to use it." : "Update to %s failed", tag.c_str());
+    UpdMsg(msg);
+}
+
 /* ── General section ──────────────────────────────────────────────────────*/
 
 void DrawGeneralSection()
@@ -261,10 +410,17 @@ void DrawGeneralSection()
     switch (ResetSaveRow()) {
     case 1:
         doa2u_log_set_enabled(0);
+        doa2u_movies_set_enabled(1);
+        doa2u_fps_set_enabled(0);
+        doa2u_fps_set_corner(FPS_TOP_LEFT);
+        doa2u_perfmon_set_threshold(20);
+        doa2u_perfmon_set_enabled(0);
         SetStatus("General settings reset to defaults");
         break;
     case 2:
-        SetSaveStatus(doa2u_log_save(), doa2u_settings_ini_path());
+        SetSaveStatus(doa2u_log_save() && doa2u_movies_save() && doa2u_fps_save() &&
+                      doa2u_perfmon_save(),
+                      doa2u_settings_ini_path());
         break;
     }
 
@@ -273,6 +429,61 @@ void DrawGeneralSection()
     bool on = doa2u_log_enabled() != 0;
     if (ImGui::Checkbox("Write log files", &on))
         doa2u_log_set_enabled(on ? 1 : 0);
+
+    bool no_fmv = doa2u_movies_enabled() == 0;
+    if (ImGui::Checkbox("Disable FMV playback", &no_fmv))
+        doa2u_movies_set_enabled(no_fmv ? 0 : 1);
+
+    static const char *kCorner[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
+    bool fps = doa2u_fps_enabled() != 0;
+    if (ImGui::Checkbox("Show FPS counter", &fps))
+        doa2u_fps_set_enabled(fps ? 1 : 0);
+    ImGui::SameLine();
+    if (!fps) ImGui::BeginDisabled();
+    int corner = doa2u_fps_corner();
+    ImGui::SetNextItemWidth(140.0f);
+    if (ImGui::Combo("##fps_corner", &corner, kCorner, IM_ARRAYSIZE(kCorner)))
+        doa2u_fps_set_corner(corner);
+    if (!fps) ImGui::EndDisabled();
+
+    bool perfmon = doa2u_perfmon_enabled() != 0;
+    if (ImGui::Checkbox("Performance monitor", &perfmon))
+        doa2u_perfmon_set_enabled(perfmon ? 1 : 0);
+    ImGui::SameLine();
+    if (!perfmon) ImGui::BeginDisabled();
+    /* Applied when editing ends, so typing "35" does not apply 3 first. */
+    static int s_threshold;
+    static bool s_editing;
+    if (!s_editing) s_threshold = doa2u_perfmon_threshold();
+    ImGui::SetNextItemWidth(60.0f);
+    ImGui::InputInt("ms##perf_threshold", &s_threshold, 0, 0);
+    s_editing = ImGui::IsItemActive();
+    if (ImGui::IsItemDeactivatedAfterEdit()) doa2u_perfmon_set_threshold(s_threshold);
+    if (!perfmon) ImGui::EndDisabled();
+
+    if (g_upd_busy) ImGui::BeginDisabled();
+    if (ImGui::Button("Check for Updates")) {
+        g_upd_busy = true;
+        UpdMsg("Checking for updates...");
+        std::thread([] { CheckForUpdates(); g_upd_busy = false; }).detach();
+    }
+    if (g_upd_busy) ImGui::EndDisabled();
+    if (g_upd_msg[0]) ImGui::TextWrapped("%s", g_upd_msg);
+
+    /* Quit centred above the bottom edge, version bottom-left. */
+    const float gap = 24.0f;
+    float bottom = ImGui::GetCursorPosY() + ImGui::GetContentRegionAvail().y -
+                   ImGui::GetFrameHeight() - gap - ImGui::GetTextLineHeight();
+    if (bottom > ImGui::GetCursorPosY()) ImGui::SetCursorPosY(bottom);
+    float quit_w = ImGui::CalcTextSize("Quit Game").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - quit_w) * 0.5f);
+    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.70f, 0.12f, 0.12f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.18f, 0.18f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.55f, 0.08f, 0.08f, 1.0f));
+    if (ImGui::Button("Quit Game")) PostMessageA(d3d8_GetHWND(), WM_CLOSE, 0, 0);
+    ImGui::PopStyleColor(3);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight());
+    ImGui::TextDisabled("v%s", DOA2U_VERSION_STRING);
 }
 
 /* ── Profile section ──────────────────────────────────────────────────────*/
@@ -298,7 +509,7 @@ void DrawProfileSection()
         profile_set_language(lang ? PROFILE_LANG_JAPANESE : PROFILE_LANG_ENGLISH);
 }
 
-/* ── Unlockables section ──────────────────────────────────────────────────*/
+/* ── Unlockables section ───────────────────────────────────────────────────────*/
 
 void DrawUnlockablesSection()
 {
@@ -368,17 +579,128 @@ void DrawUnlockablesSection()
     }
 }
 
+void DrawFpsCounter()
+{
+    char text[16];
+    _snprintf_s(text, sizeof(text), _TRUNCATE, "%.0f", d3d8_GetGameFPS());
+
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    ImFont *font = g_fps_font ? g_fps_font : ImGui::GetFont();
+    float size = vp->WorkSize.y * 0.045f;
+    if (size < 24.0f) size = 24.0f;
+    float pad = size * 0.4f;
+    ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
+
+    int c = doa2u_fps_corner();
+    bool right = c == FPS_TOP_RIGHT || c == FPS_BOTTOM_RIGHT;
+    bool bottom = c == FPS_BOTTOM_LEFT || c == FPS_BOTTOM_RIGHT;
+    ImVec2 pos(right  ? vp->WorkPos.x + vp->WorkSize.x - pad - ts.x : vp->WorkPos.x + pad,
+               bottom ? vp->WorkPos.y + vp->WorkSize.y - pad - ts.y : vp->WorkPos.y + pad);
+
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    const ImU32 outline = IM_COL32(0, 0, 0, 255);
+    float o = size / 16.0f;
+    for (int dx = -1; dx <= 1; ++dx)
+        for (int dy = -1; dy <= 1; ++dy)
+            if (dx || dy) dl->AddText(font, size, ImVec2(pos.x + dx * o, pos.y + dy * o), outline, text);
+    dl->AddText(font, size, pos, IM_COL32(255, 255, 0, 255), text);
+}
+
+/* Stacked frame time per subsystem for the last PERF_HISTORY frames, under the menu. */
+void DrawPerfGraph(ImVec2 menu_pos, ImVec2 menu_size)
+{
+    static const ImU32 kColor[PERF_COUNT] = {
+        IM_COL32(110, 130, 160, 255),   /* game logic */
+        IM_COL32(240, 150,  40, 255),   /* GPU command translation */
+        IM_COL32(220,  60,  60, 255),   /* draw submission */
+        IM_COL32(240, 220,  60, 255),   /* texture conversion */
+        IM_COL32( 80, 200,  90, 255),   /* streaming/decode */
+        IM_COL32( 70, 200, 220, 255),   /* audio interrupt */
+        IM_COL32(160, 100, 220, 255),   /* compose */
+        IM_COL32(230, 100, 180, 255),   /* present wait */
+    };
+    static float s_frames[PERF_HISTORY][PERF_COUNT];
+    int n = perf_history(s_frames, PERF_HISTORY);
+
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    const float h = 250.0f;
+    float y = menu_pos.y + menu_size.y + 8.0f;
+    if (y + h > vp->WorkPos.y + vp->WorkSize.y) y = vp->WorkPos.y + vp->WorkSize.y - h;
+    ImGui::SetNextWindowPos(ImVec2(menu_pos.x, y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(menu_size.x, h), ImGuiCond_Always);
+    if (ImGui::Begin("Performance", nullptr,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+        float scale_ms = 1000.0f / 30.0f;   /* two frames of headroom, more if needed */
+        for (int i = 0; i < n; ++i) {
+            float t = 0.0f;
+            for (int p = 0; p < PERF_COUNT; ++p) t += s_frames[i][p];
+            if (t > scale_ms) scale_ms = t;
+        }
+
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        ImVec2 o = ImGui::GetCursorScreenPos();
+        float w = ImGui::GetContentRegionAvail().x, ph = 150.0f;
+        float bar = w / (float)PERF_HISTORY;
+        dl->AddRectFilled(o, ImVec2(o.x + w, o.y + ph), IM_COL32(20, 20, 24, 255));
+        for (int i = 0; i < n; ++i) {
+            float x0 = o.x + w - (float)(n - i) * bar, x1 = x0 + (bar > 1.0f ? bar - 0.5f : bar);
+            float base = o.y + ph;
+            for (int p = 0; p < PERF_COUNT; ++p) {
+                float hh = s_frames[i][p] / scale_ms * ph;
+                if (hh <= 0.0f) continue;
+                dl->AddRectFilled(ImVec2(x0, base - hh), ImVec2(x1, base), kColor[p]);
+                base -= hh;
+            }
+        }
+        float budget = o.y + ph - (1000.0f / 60.0f) / scale_ms * ph;
+        dl->AddLine(ImVec2(o.x, budget), ImVec2(o.x + w, budget), IM_COL32(255, 255, 255, 200));
+        dl->AddText(ImVec2(o.x + 4.0f, budget - ImGui::GetTextLineHeight()), IM_COL32(255, 255, 255, 220), "16.7 ms");
+        char top[32];
+        _snprintf_s(top, sizeof(top), _TRUNCATE, "%.0f ms", scale_ms);
+        dl->AddText(ImVec2(o.x + 4.0f, o.y + 2.0f), IM_COL32(200, 200, 200, 220), top);
+        ImGui::Dummy(ImVec2(w, ph + 4.0f));
+
+        /* Colour key. */
+        float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+        for (int p = 0; p < PERF_COUNT; ++p) {
+            const char *name = perf_part_name(p);
+            float item = ImGui::GetTextLineHeight() + 4.0f + ImGui::CalcTextSize(name).x;
+            if (p > 0) {
+                ImGui::SameLine(0.0f, 14.0f);
+                if (ImGui::GetCursorPosX() + item > right) ImGui::NewLine();
+            }
+            ImVec2 c = ImGui::GetCursorScreenPos();
+            float s = ImGui::GetTextLineHeight();
+            ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(c.x, c.y + 2.0f),
+                                                      ImVec2(c.x + s - 4.0f, c.y + s - 2.0f), kColor[p]);
+            ImGui::Dummy(ImVec2(s, s));
+            ImGui::SameLine(0.0f, 0.0f);
+            ImGui::TextUnformatted(name);
+        }
+    }
+    ImGui::End();
+}
+
 void DrawMenu()
 {
     const ImGuiViewport *vp = ImGui::GetMainViewport();
+    /* Re-centre when the window is resized (window type change). */
+    static ImVec2 s_last_size;
+    bool resized = vp->WorkSize.x != s_last_size.x || vp->WorkSize.y != s_last_size.y;
+    s_last_size = vp->WorkSize;
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
                                    vp->WorkPos.y + vp->WorkSize.y * 0.5f),
-                            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                            resized ? ImGuiCond_Always : ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(560, 460), ImGuiCond_Appearing);
 
     bool open = true;
     if (ImGui::Begin("Dead or Alive 2 Ultimate", &open, ImGuiWindowFlags_NoCollapse)) {
         if (ImGui::BeginTabBar("##tabs")) {
+            if (ImGui::BeginTabItem("General")) {
+                DrawGeneralSection();
+                ImGui::EndTabItem();
+            }
             if (ImGui::BeginTabItem("Controls")) {
                 DrawControlsSection();
                 ImGui::EndTabItem();
@@ -391,10 +713,6 @@ void DrawMenu()
                 DrawProfileSection();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("General")) {
-                DrawGeneralSection();
-                ImGui::EndTabItem();
-            }
             if (ImGui::BeginTabItem("Unlockables")) {
                 DrawUnlockablesSection();
                 ImGui::EndTabItem();
@@ -403,11 +721,15 @@ void DrawMenu()
             ImGui::EndTabBar();
         }
     }
+    ImVec2 menu_pos = ImGui::GetWindowPos(), menu_size = ImGui::GetWindowSize();
     ImGui::End();
+
+    if (doa2u_perfmon_enabled()) DrawPerfGraph(menu_pos, menu_size);
 
     if (!open) {
         g_visible = false;
         pad_mapping_set_menu_open(0);
+        RefreshCursor();
     }
 }
 
@@ -436,6 +758,17 @@ extern "C" int doa2u_ui_init(void)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     ImGui::StyleColorsDark();
 
+    /* Default font stays first (the menu); a bold system font for the FPS
+     * counter, falling back to the default scaled up if it is not installed. */
+    io.Fonts->AddFontDefault();
+    char font_path[MAX_PATH];
+    UINT n = GetWindowsDirectoryA(font_path, MAX_PATH);
+    if (n && n < MAX_PATH - 32) {
+        strcat_s(font_path, sizeof(font_path), "\\Fonts\\arialbd.ttf");
+        if (GetFileAttributesA(font_path) != INVALID_FILE_ATTRIBUTES)
+            g_fps_font = io.Fonts->AddFontFromFileTTF(font_path, 64.0f);
+    }
+
     if (!ImGui_ImplWin32_Init(hwnd)) { ImGui::DestroyContext(); return 0; }
     if (!ImGui_ImplDX11_Init(dev, ctx)) {
         ImGui_ImplWin32_Shutdown();
@@ -451,6 +784,7 @@ extern "C" void doa2u_ui_shutdown(void)
 {
     if (!g_ready) return;
     g_ready = false;
+    g_fps_font = nullptr;
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
@@ -466,6 +800,7 @@ extern "C" void doa2u_ui_toggle(void)
     g_pending_vk = 0;
     /* Keyboard sources are suppressed while the menu owns the keyboard. */
     pad_mapping_set_menu_open(g_visible ? 1 : 0);
+    RefreshCursor();
 }
 
 extern "C" int doa2u_ui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -481,6 +816,12 @@ extern "C" int doa2u_ui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         } else {
             doa2u_ui_toggle();
         }
+        return 1;
+    }
+
+    /* No cursor over the game while the overlay is closed. */
+    if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT && !g_visible) {
+        SetCursor(NULL);
         return 1;
     }
 
@@ -510,8 +851,9 @@ extern "C" int doa2u_ui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 extern "C" void doa2u_ui_render(void)
 {
-    /* Nothing to do on a normal frame unless the menu is open. */
-    if (!g_visible) return;
+    /* Nothing to do on a normal frame unless the menu is open or the FPS
+     * counter is on. */
+    if (!g_visible && !doa2u_fps_enabled()) return;
     if (!g_ready && !doa2u_ui_init()) return;
 
     ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
@@ -531,7 +873,8 @@ extern "C" void doa2u_ui_render(void)
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    DrawMenu();
+    if (doa2u_fps_enabled()) DrawFpsCounter();
+    if (g_visible) DrawMenu();
 
     ImGui::Render();
 

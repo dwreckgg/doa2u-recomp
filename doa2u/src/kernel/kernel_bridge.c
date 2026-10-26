@@ -1396,7 +1396,7 @@ static HANDLE bridge_read_handle(uint32_t va)
 /* Translate Xbox path and open file via Win32 CreateFileW */
 /* z:\ cache copies of the game archives: cache MISS -> the d:\ original.
  *
- * The game's wxCi installer copies loadfile/bgm/voice.afs to Z: in the background
+ * The game's wxCi installer copies datahdd/datahdd2/voice.afs to Z: in the background
  * and the boot keeps going meanwhile. On the console a copy that is not there
  * yet is a plain cache miss and the CRI reads the disc instead. Here that
  * miss was fatal: with an empty cache the installer was still on voice.afs
@@ -1416,7 +1416,8 @@ static HANDLE bridge_read_handle(uint32_t va)
 static int bridge_cache_archive_fallback(const char *xbox_path, WCHAR *win_path,
                                          DWORD win_access, const char *why)
 {
-    static const char *k_afs[] = { "loadfile.afs", "bgm.afs", "voice.afs" };
+    /* DOA2U's wxCi cache set: z:\<name> is a copy of d:\doa2\<name>. */
+    static const char *k_afs[] = { "datahdd.afs", "datahdd2.afs", "voice.afs" };
     const char *name;
     int i;
     if (!xbox_path || !((xbox_path[0] == 'z' || xbox_path[0] == 'Z') && xbox_path[1] == ':'))
@@ -1433,7 +1434,7 @@ static int bridge_cache_archive_fallback(const char *xbox_path, WCHAR *win_path,
             char dpath[64];
             WCHAR alt[MAX_PATH];
             if (!installing) return 0;
-            snprintf(dpath, sizeof dpath, "D:\\%s", k_afs[i]);
+            snprintf(dpath, sizeof dpath, "D:\\DOA2\\%s", k_afs[i]);
             if (xbox_translate_path(dpath, alt, MAX_PATH) &&
                 GetFileAttributesW(alt) != INVALID_FILE_ATTRIBUTES) {
                 wcscpy_s(win_path, MAX_PATH, alt);
@@ -1829,6 +1830,27 @@ static void bridge_NtWriteFile(void)
     }
 }
 
+/* XDVDFS has no per-file times: every D: file carries the disc's mastering time
+ * (volume descriptor +0x1C), so re-extracting the assets cannot stale the z:\ cache. */
+#define DOA2U_DISC_FILETIME 0x01C4AFDD3AFE3CF0ull
+static void bridge_disc_time(const WCHAR *win_path, FILETIME *ft)
+{
+    static WCHAR s_game[MAX_PATH];
+    static size_t s_len;
+    if (!s_len) {
+        WCHAR *slash;
+        if (!xbox_translate_path("D:\\x", s_game, MAX_PATH)) return;
+        slash = wcsrchr(s_game, L'\\');
+        if (!slash) return;
+        slash[1] = 0;
+        s_len = wcslen(s_game);
+    }
+    if (win_path && !_wcsnicmp(win_path, s_game, s_len)) {
+        ft->dwLowDateTime  = (DWORD)DOA2U_DISC_FILETIME;
+        ft->dwHighDateTime = (DWORD)(DOA2U_DISC_FILETIME >> 32);
+    }
+}
+
 /* ── NtQueryInformationFile (ordinal 211, 5 args = 20 bytes) */
 /* File times handed to the guest are ALL the host LastWriteTime.
  *
@@ -1856,6 +1878,7 @@ static void bridge_NtQueryInformationFile(void)
     switch (infoclass) {
     case 4: { /* FileBasicInformation (36 bytes) */
         if (!GetFileInformationByHandle(handle, &fi)) { g_eax = 0xC0000001u; return; }
+        bridge_disc_time(xbox_fh_path(STACK_ARG(0)), &fi.ftLastWriteTime);
         BRIDGE_MEM32(info_va +  0) = fi.ftLastWriteTime.dwLowDateTime;
         BRIDGE_MEM32(info_va +  4) = fi.ftLastWriteTime.dwHighDateTime;
         BRIDGE_MEM32(info_va +  8) = fi.ftLastWriteTime.dwLowDateTime;
@@ -1906,6 +1929,7 @@ static void bridge_NtQueryInformationFile(void)
     case 34: { /* FileNetworkOpenInformation (56 bytes) */
         LONGLONG size;
         if (!GetFileInformationByHandle(handle, &fi)) { g_eax = 0xC0000001u; return; }
+        bridge_disc_time(xbox_fh_path(STACK_ARG(0)), &fi.ftLastWriteTime);
         size = ((LONGLONG)fi.nFileSizeHigh << 32) | fi.nFileSizeLow;
         BRIDGE_MEM32(info_va +  0) = fi.ftLastWriteTime.dwLowDateTime;
         BRIDGE_MEM32(info_va +  4) = fi.ftLastWriteTime.dwHighDateTime;
@@ -2086,6 +2110,7 @@ static void bridge_NtQueryFullAttributesFile(void)
                 ? STATUS_OBJECT_NAME_NOT_FOUND : 0xC0000001u;
         return;
     }
+    bridge_disc_time(win_path, &fad.ftLastWriteTime);
 
     size = ((LONGLONG)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
     BRIDGE_MEM32(info_va +  0) = fad.ftLastWriteTime.dwLowDateTime;
@@ -2290,6 +2315,7 @@ static void bridge_NtQueryDirectoryFile(void)
                                     filename_ansi, MAX_PATH, NULL, NULL);
     if (name_len > 0) name_len--;
 
+    bridge_disc_time(xbox_fh_path(STACK_ARG(0)), &fd.ftLastWriteTime);
     BRIDGE_MEM32(info_va +  0) = 0; /* NextEntryOffset */
     BRIDGE_MEM32(info_va +  4) = 0; /* FileIndex */
     BRIDGE_MEM32(info_va +  8) = fd.ftLastWriteTime.dwLowDateTime;
