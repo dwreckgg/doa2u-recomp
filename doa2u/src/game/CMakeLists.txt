@@ -28,6 +28,7 @@ set(GAME_SOURCES
     ${CMAKE_SOURCE_DIR}/src/ui/video_settings.c
     ${CMAKE_SOURCE_DIR}/src/ui/log_settings.c
     ${CMAKE_SOURCE_DIR}/src/ui/profile_settings.c
+    ${CMAKE_SOURCE_DIR}/src/ui/extras.c
     recomp/recomp_manual.c
     burnout_compat_stubs.c   # inert stubs for burnout-only symbols the nv2a srcs need
     assets/doa2u.rc

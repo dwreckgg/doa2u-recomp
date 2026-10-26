@@ -657,6 +657,19 @@ void sub_0034AF80(void)
                 }
             }
         }
+        {   /* Extras changed the profile: run the game's own save of the loaded
+             * profile (sub_00023D00, as after a settings change) on this thread. */
+            extern int doa2u_extras_take_save_request(void);
+            extern void sub_00023D00(void);
+            if (doa2u_extras_take_save_request()) {
+                uint32_t saved = esp, sv_seh = g_seh_ebp;
+                PUSH32(esp, 0);                     /* dummy return */
+                sub_00023D00();
+                fprintf(stderr, "[EXTRAS] profile save -> %d\n", (int)eax);
+                fflush(stderr);
+                esp = saved; g_seh_ebp = sv_seh;
+            }
+        }
         eax = ret_eax; esp = ret_esp;
     }
     esi = sv_esi; edi = sv_edi; ebx = sv_ebx;
