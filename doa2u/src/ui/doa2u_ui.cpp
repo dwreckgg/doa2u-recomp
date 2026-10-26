@@ -21,6 +21,9 @@ extern "C" {
 #include "log_settings.h"
 #include "profile_settings.h"
 #include "../kernel/perf.h"
+#include "../online/netplay_session.h"
+#include "../online/netplay_diag.h"
+#include "../online/online_settings.h"
 ID3D11RenderTargetView *d3d8_GetPresentRTV(void);
 UINT                    d3d8_GetPresentWidth(void);
 UINT                    d3d8_GetPresentHeight(void);
@@ -611,6 +614,100 @@ void DrawPerfGraph(ImVec2 menu_pos, ImVec2 menu_size)
     ImGui::End();
 }
 
+/* ── Online section ──────────────────────────────────────────────────────
+ * Ported from parkerallan/doa3-recomp (MIT) doa3/src/ui/doa3_ui.cpp
+ * DrawOnlineSection at 919c49f. This part is the Testing header: local
+ * sessions, recording and replay, RAM dumps. */
+void DrawOnlineTesting()
+{
+    static const char *kState[] = { "Off", "Armed - waiting for the Versus character select", "Session running" };
+    static int  role = NP_ROLE_HOST;
+    static char dump_tag[33] = "";
+    static char files[32][128];
+    static int  nfiles = -1, pick = 0;
+    np_status st;
+    netplay_get_status(&st);
+    bool running = st.state == NP_STATE_ACTIVE;
+
+    if (!ImGui::CollapsingHeader("Testing")) return;
+
+    if (running) ImGui::BeginDisabled();
+    bool role_changed = ImGui::RadioButton("Host path", &role, NP_ROLE_HOST);
+    ImGui::SameLine();
+    role_changed |= ImGui::RadioButton("Joiner path", &role, NP_ROLE_JOINER);
+    /* The role travels with the arm call; a radio changed while already armed
+     * must reach the session too (measured 2026-10-26: Joiner picked after
+     * arming still ran the host path). */
+    if (role_changed && netplay_armed()) netplay_set_armed(1, role);
+    bool mirror = netplay_mirror() != 0;
+    if (ImGui::Checkbox("Player 2 mirrors Player 1 (one controller)", &mirror))
+        netplay_set_mirror(mirror ? 1 : 0);
+    bool armed = netplay_armed() != 0;
+    if (ImGui::Checkbox("Arm local session", &armed))
+        netplay_set_armed(armed ? 1 : 0, role);
+    if (running) ImGui::EndDisabled();
+
+    bool diag = online_get_diag() != 0;
+    if (ImGui::Checkbox("Diagnostic logs", &diag)) online_set_diag(diag ? 1 : 0);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Save##online")) SetSaveStatus(online_settings_save(), doa2u_settings_ini_path());
+
+    ImGui::Text("State: %s", kState[st.state >= 0 && st.state < 3 ? st.state : 0]);
+    if (running) {
+        ImGui::Text("%s Battle, %s path, frame %u", st.tag ? "Tag" : "Single",
+                    st.role == NP_ROLE_JOINER ? "joiner" : "host", st.frame);
+        ImGui::Text("Digest %016llX", (unsigned long long)st.digest);
+    }
+    ImGui::Text("Sessions completed: %u", st.sessions);
+    if (st.last_log[0]) ImGui::TextDisabled("Last log: %s", st.last_log);
+
+    /* Determinism check: record a session, then replay it (ideally in a
+     * fresh launch) and see whether every frame's digest matches. */
+    ImGui::SeparatorText("Replays");
+    bool record = netplay_record() != 0;
+    if (ImGui::Checkbox("Record each session to a replay file", &record))
+        netplay_set_record(record ? 1 : 0);
+    if (nfiles < 0 || ImGui::Button("Refresh")) {
+        nfiles = netplay_list_replays(files, 32);
+        if (pick >= nfiles) pick = 0;
+    }
+    if (nfiles > 0) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(330);
+        if (ImGui::BeginCombo("##replay", files[pick])) {
+            for (int i = 0; i < nfiles; i++)
+                if (ImGui::Selectable(files[i], i == pick)) pick = i;
+            ImGui::EndCombo();
+        }
+        if (running) ImGui::BeginDisabled();
+        if (ImGui::Button("Replay selected")) netplay_request_replay(files[pick]);
+        if (running) ImGui::EndDisabled();
+    } else {
+        ImGui::SameLine();
+        ImGui::TextDisabled("No replay files yet");
+    }
+    if (running && st.replaying) {
+        if (st.diverged_at == NP_NO_FRAME)
+            ImGui::Text("Replay frame %u / %u - matching", st.frame, st.replay_frames);
+        else
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Replay frame %u / %u - diverged at frame %u",
+                               st.frame, st.replay_frames, st.diverged_at);
+    }
+    if (st.message[0]) ImGui::TextWrapped("%s", st.message);
+
+    ImGui::SeparatorText("Guest RAM");
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputText("tag##dump", dump_tag, sizeof dump_tag);
+    ImGui::SameLine();
+    if (ImGui::Button("Dump")) netplay_diag_request_dump(dump_tag);
+    if (netplay_diag_last_dump()[0]) ImGui::TextDisabled("Last dump: %s", netplay_diag_last_dump());
+}
+
+void DrawOnlineSection()
+{
+    DrawOnlineTesting();
+}
+
 void DrawMenu()
 {
     const ImGuiViewport *vp = ImGui::GetMainViewport();
@@ -640,6 +737,10 @@ void DrawMenu()
             }
             if (ImGui::BeginTabItem("Profile")) {
                 DrawProfileSection();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Online")) {
+                DrawOnlineSection();
                 ImGui::EndTabItem();
             }
 
