@@ -75,6 +75,48 @@ static struct {
     int                eof, quit;
 } s_dec;
 
+extern ptrdiff_t g_xbox_mem_offset;
+
+/* The game's Sofdec CSC table: [Y|Cb|Cr][256] x {B,G,R,A} int16 in 1/64 units,
+ * at +0x3C of converter handle 0x1056638; used only as sub_00323670 decides. */
+static const int16_t *movie_guest_csc_table(void)
+{
+    const uint8_t *cnv = (const uint8_t *)(g_xbox_mem_offset + 0x1056638);
+    uint32_t fmt = *(volatile const uint32_t *)(cnv + 0x04);
+    uint32_t va  = *(volatile const uint32_t *)(cnv + 0x3C);
+    const int16_t *t;
+    if (fmt == 0x11 ? *(volatile const uint32_t *)(cnv + 0x34) != 1
+                    : fmt != 0x21 && fmt != 0x31 && fmt != 0x41 && fmt != 0x1001)
+        return NULL;
+    if (va < 0x10000 || va > 0x4000000 - 0x1800) return NULL;
+    t = (const int16_t *)(g_xbox_mem_offset + va);
+    return t[3] == 255 << 6 && t[1024 + 3] == 0 ? t : NULL;  /* Y alpha, Cb alpha */
+}
+
+/* Sofdec's 4:2:0 -> ARGB8888 conversion with the game's table; without one
+ * Sofdec uses BT.601, as does plm_frame_to_bgra. */
+static void movie_frame_to_bgra(plm_frame_t *f, unsigned char *dst, int stride)
+{
+    const int16_t *tab = movie_guest_csc_table();
+    if (!tab) { plm_frame_to_bgra(f, dst, stride); return; }
+    for (unsigned y = 0; y < f->height; y++) {
+        const uint8_t *py = f->y.data + y * f->y.width;
+        const uint8_t *pb = f->cb.data + (y >> 1) * f->cb.width;
+        const uint8_t *pr = f->cr.data + (y >> 1) * f->cr.width;
+        unsigned char *d = dst + y * stride;
+        for (unsigned x = 0; x < f->width; x++, d += 4) {
+            const int16_t *ty = tab + py[x] * 4;
+            const int16_t *tb = tab + 1024 + pb[x >> 1] * 4;
+            const int16_t *tr = tab + 2048 + pr[x >> 1] * 4;
+            for (int c = 0; c < 3; c++) {
+                int v = (ty[c] + tb[c] + tr[c]) >> 6;
+                d[c] = (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v);
+            }
+            d[3] = 255;
+        }
+    }
+}
+
 static DWORD WINAPI movie_decode_thread(LPVOID unused)
 {
     (void)unused;
@@ -90,7 +132,7 @@ static DWORD WINAPI movie_decode_thread(LPVOID unused)
 
         frame = plm_video_decode(s_host_video);
         if (frame)
-            plm_frame_to_bgra(frame, dst, 720 * 4);
+            movie_frame_to_bgra(frame, dst, 720 * 4);
 
         AcquireSRWLockExclusive(&s_dec.lock);
         if (frame) s_dec.count++;
