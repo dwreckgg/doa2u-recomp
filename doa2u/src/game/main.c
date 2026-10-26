@@ -47,6 +47,7 @@ static LRESULT CALLBACK doa2u_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     if (m == WM_CLOSE)   { DestroyWindow(h); return 0; }
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    if (m == WM_DEVICECHANGE) { extern void xbox_InputDevicesChanged(void); xbox_InputDevicesChanged(); }
     /* The Esc overlay gets first refusal on input: it opens/closes itself and,
      * while visible, keeps keyboard and mouse out of the game. */
     if (doa2u_ui_wndproc(h, m, w, l)) return 0;

@@ -68,8 +68,8 @@ bool CaptureBinding(PadBinding &out)
     }
 
     XINPUT_STATE xi;
-    for (DWORD port = 0; port < 4; ++port) {
-        if (XInputGetState(port, &xi) != ERROR_SUCCESS) continue;
+    for (DWORD pad = 0; pad < XBOX_INPUT_HOST_PADS; ++pad) {
+        if (!xbox_InputReadHostPad(pad, &xi)) continue;
 
         static const int kButtons[] = {
             XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
