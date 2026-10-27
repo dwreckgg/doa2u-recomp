@@ -9,6 +9,7 @@
 #include "netplay_game.h"
 #include "online_settings.h"
 #include "netplay_session.h"
+#include "netplay.h"
 #include "game/recomp/recomp_types.h"
 #include "kernel/xbox_memory_layout.h"
 
@@ -194,6 +195,20 @@ static void take_ctl_file(void)
         else if (!strcmp(cmd, "replay")) netplay_request_replay(arg);
         else if (!strcmp(cmd, "screens")) s_screens_forced = atoi(arg) ? 1 : -1;
         else if (!strcmp(cmd, "p2neutral")) s_p2_neutral = atoi(arg) ? 1 : 0;
+        /* the Online tab's connection actions, for hands-off tests */
+        else if (!strcmp(cmd, "host")) netplay_host(arg[0] ? (unsigned short)atoi(arg) : netplay_port());
+        else if (!strcmp(cmd, "join")) netplay_use_code(arg);
+        else if (!strcmp(cmd, "disconnect")) netplay_disconnect();
+        else if (!strcmp(cmd, "battle")) netplay_set_battle(atoi(arg));
+        else if (!strcmp(cmd, "delay")) netplay_set_delay(!strcmp(arg, "auto"), atoi(arg));
+        else if (!strcmp(cmd, "status")) {
+            npl_status nl;
+            netplay_get(&nl);
+            fprintf(stderr, "[netplay] lobby: state %d, %s, port %u, battle %d, code '%s' (%s), ping %.0f ms, delay %d | %s | %s | %s\n",
+                    nl.state, nl.is_host ? "host" : "joiner", (unsigned)nl.port, nl.battle, nl.my_code, nl.my_code_note,
+                    nl.ping_ms, nl.delay, nl.status, nl.event, nl.hint);
+            fflush(stderr);
+        }
         if (online_get_diag()) { fprintf(stderr, "[netplay] ctl: %s %s %s\n", cmd, arg, arg2); fflush(stderr); }
     }
     fclose(f);
