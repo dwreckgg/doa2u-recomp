@@ -21164,7 +21164,7 @@ loc_00366046: ;
  * CC: cdecl, 0 params, returns int_or_void
  * Frame: fpo_leaf
  */
-void sub_0036604A(void)
+void sub_0036604A_gen(void)
 {
     uint32_t ebp;
     int _cf = 0; /* carry flag */

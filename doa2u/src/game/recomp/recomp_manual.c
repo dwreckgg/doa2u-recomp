@@ -669,6 +669,25 @@ static void d3d_publish_vblank(uint32_t dev)
     }
 }
 
+/* IDirectSound_SetI3DL2Listener (0x0036604A, stdcall pDS, pParams, dwApply): the
+ * game's room-reverb settings, a DSI3DL2LISTENER (lRoom, lRoomHF, flRoomRolloffFactor,
+ * flDecayTime, flDecayHFRatio, lReflections, flReflectionsDelay, lReverb,
+ * flReverbDelay, flDiffusion, flDensity, flHFReference). The DSP that runs the
+ * reverb is not emulated, so the host reverb (apu_reverb.cpp) takes them; then the
+ * game's own call proceeds. */
+void sub_0036604A(void)
+{
+    extern void xa2_reverb_set_i3dl2(const void *params);
+    extern void sub_0036604A_gen(void);
+    const uint32_t params = MEM32(esp + 8);
+    if (params >= 0x1000 && params < 0x8000000u) {
+        uint32_t p[12];
+        for (int k = 0; k < 12; k++) p[k] = MEM32(params + 4u * (uint32_t)k);
+        xa2_reverb_set_i3dl2(p);
+    }
+    sub_0036604A_gen();
+}
+
 /* D3DDevice_Swap (0x0034AF80): run the real Swap, present (or tick the movie),
  * then model the vblank (event + callback). */
 void sub_0034AF80(void)

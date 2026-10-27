@@ -421,6 +421,7 @@ void DrawGeneralSection()
         doa2u_log_set_enabled(0);
         doa2u_movies_set_enabled(1);
         doa2u_surround_set_enabled(0);
+        doa2u_reverb_set_enabled(1);
         doa2u_fps_set_enabled(0);
         doa2u_fps_set_corner(FPS_TOP_LEFT);
         doa2u_perfmon_set_threshold(20);
@@ -429,7 +430,7 @@ void DrawGeneralSection()
         break;
     case 2:
         SetSaveStatus(doa2u_log_save() && doa2u_movies_save() && doa2u_fps_save() &&
-                      doa2u_perfmon_save() && doa2u_surround_save(),
+                      doa2u_perfmon_save() && doa2u_surround_save() && doa2u_reverb_save(),
                       doa2u_settings_ini_path());
         break;
     }
@@ -443,6 +444,10 @@ void DrawGeneralSection()
     bool no_fmv = doa2u_movies_enabled() == 0;
     if (ImGui::Checkbox("Disable FMV playback", &no_fmv))
         doa2u_movies_set_enabled(no_fmv ? 0 : 1);
+
+    bool reverb = doa2u_reverb_enabled() != 0;
+    if (ImGui::Checkbox("Room reverb", &reverb))
+        doa2u_reverb_set_enabled(reverb ? 1 : 0);
 
     bool surround = doa2u_surround_enabled() != 0;
     if (ImGui::Checkbox("5.1 surround sound", &surround))

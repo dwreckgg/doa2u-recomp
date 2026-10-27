@@ -98,6 +98,24 @@ int doa2u_surround_active(void)
     return g_surround_boot;
 }
 
+static int g_reverb = -1;   /* -1 = not read from the ini yet */
+
+int doa2u_reverb_enabled(void)
+{
+    if (g_reverb < 0)
+        g_reverb = GetPrivateProfileIntA("General", "Reverb", 1, doa2u_settings_ini_path()) != 0;
+    return g_reverb;
+}
+
+void doa2u_reverb_set_enabled(int on) { g_reverb = on ? 1 : 0; }
+
+int doa2u_reverb_save(void)
+{
+    /* Reverb: 0 = off, 1 = the game's room reverb on the host. */
+    return WritePrivateProfileStringA("General", "Reverb", doa2u_reverb_enabled() ? "1" : "0",
+                                      doa2u_settings_ini_path());
+}
+
 static int g_fps = -1, g_fps_corner = -1;   /* -1 = not read from the ini yet */
 
 int doa2u_fps_enabled(void)

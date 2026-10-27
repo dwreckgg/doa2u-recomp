@@ -22,6 +22,7 @@
 #include "apu_state.h"
 #include "apu.h"
 #include "apu_xaudio2.h"
+#include "apu_reverb.h"
 #include "fpconv.h"
 
 /* ============================================================
@@ -259,6 +260,20 @@ void mcpx_apu_monitor_finalize(MCPXAPUState *d)
     g_waveout.initialized = false;
 }
 
+/* The I3DL2 send staged at the dry output's cadence and submitted with it to the
+ * host reverb (apu_reverb.cpp), when the game has set a room and reverb is on. */
+static int16_t s_wet_stage[1024][2];
+static void wet_stage(MCPXAPUState *d, int at, int take)
+{
+    for (int i = 0; i < take; i++)
+        s_wet_stage[at + i][0] = s_wet_stage[at + i][1] = g_audio_muted ? 0 : d->monitor.wet_buf[i];
+}
+static void wet_submit(int n)
+{
+    extern int doa2u_reverb_enabled(void);
+    if (xa2_reverb_ready() && doa2u_reverb_enabled()) xa2_reverb_submit((const int16_t *)s_wet_stage, n);
+}
+
 void mcpx_apu_monitor_frame(MCPXAPUState *d)
 {
     if ((d->ep_frame_div + 1) % 8) {
@@ -304,6 +319,7 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
             int take = MIXER_FRAME_SAMPLES;
             if (s_fill6 + take > buf_size) take = buf_size - s_fill6;
             memcpy(s_stage6 + s_fill6, d->monitor.frame_buf6, take * 6 * sizeof(int16_t));
+            wet_stage(d, s_fill6, take);
             s_fill6 += take;
         }
         if (s_fill6 >= buf_size) {
@@ -312,6 +328,7 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
             int spins = 0;
             while (xa2_queued() >= xa2_max_queued() && spins < 200) { qemu_mutex_unlock(&d->lock); Sleep(1); qemu_mutex_lock(&d->lock); spins++; }
             xa2_submit_samples((const int16_t *)s_stage6, buf_size);
+            wet_submit(buf_size);
             s_fill6 = 0;
         }
         memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
@@ -345,6 +362,7 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
             int take = MIXER_FRAME_SAMPLES;
             if (s_fill + take > buf_size) take = buf_size - s_fill;
             memcpy(s_stage + s_fill, d->monitor.frame_buf, take * 2 * sizeof(int16_t));
+            wet_stage(d, s_fill, take);
             s_fill += take;
         }
         if (s_fill >= buf_size) {
@@ -357,6 +375,7 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
             int spins = 0;
             while (xa2_queued() >= xa2_max_queued() && spins < 200) { qemu_mutex_unlock(&d->lock); Sleep(1); qemu_mutex_lock(&d->lock); spins++; }
             xa2_submit_samples((const int16_t *)s_stage, buf_size);
+            wet_submit(buf_size);
             s_fill = 0;
         }
         /* a DSP that stops writing (paused/idle) must yield silence, not a

@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "apu_xaudio2.h"
+#include "apu_reverb.h"
 
 /* KSDATAFORMAT_SUBTYPE_PCM, defined here so no extra import library is needed. */
 static const GUID k_subtype_pcm = { 0x00000001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
@@ -93,6 +94,8 @@ int xa2_init(void)
     }
 
     IXAudio2SourceVoice_Start(g_xa2_source, 0, XAUDIO2_COMMIT_NOW);
+    if (!xa2_reverb_init(g_xa2))
+        fprintf(stderr, "[AUDIO] room reverb unavailable (XAudio2 reverb could not be created)\n");
 
     g_xa2_next_buf = 0;
     g_xa2_initialized = 1;
@@ -106,6 +109,7 @@ void xa2_shutdown(void)
     if (!g_xa2_initialized) return;
 
     xa2_movie_stop();
+    xa2_reverb_shutdown();
     if (g_xa2_source) {
         IXAudio2SourceVoice_Stop(g_xa2_source, 0, XAUDIO2_COMMIT_NOW);
         IXAudio2SourceVoice_FlushSourceBuffers(g_xa2_source);

@@ -38,6 +38,12 @@ void doa2u_surround_set_enabled(int on);
 int  doa2u_surround_save(void);
 int  doa2u_surround_active(void);
 
+/* Room reverb (the game's I3DL2 settings on the host), persisted as Reverb= in
+ * [General] (default on). Takes effect immediately. */
+int  doa2u_reverb_enabled(void);
+void doa2u_reverb_set_enabled(int on);
+int  doa2u_reverb_save(void);
+
 /* FPS counter, persisted as FpsCounter= (0/1) and FpsCorner= in [General]. */
 enum { FPS_TOP_LEFT, FPS_TOP_RIGHT, FPS_BOTTOM_LEFT, FPS_BOTTOM_RIGHT };
 int  doa2u_fps_enabled(void);

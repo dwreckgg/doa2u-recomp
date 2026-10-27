@@ -90,6 +90,11 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
             /* plus the hardware's stereo program: centre and surround at -3 dB
              * (apu_downmix.c); they were dropped, so frontal sounds lost level. */
             apu_stereo_downmix(s, gain, g_xtlk, &left, &right);
+            {   /* bin 10: the I3DL2 send, scaled back up by its headroom */
+                float w = mixbins[10][i] * (float)(1 << d->vp.submix_headroom[10]);
+                w = w > 1.0f ? 1.0f : w < -1.0f ? -1.0f : w;
+                d->monitor.wet_buf[off + i] = (int16_t)(w * 32767.0f);
+            }
             if (surround) {
                 float six[6];
                 apu_surround_mix(s, gain, g_xtlk, six);

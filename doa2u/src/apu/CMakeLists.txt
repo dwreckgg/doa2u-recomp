@@ -14,6 +14,7 @@ add_library(apu_emu STATIC
     apu_downmix.c
     apu_resample.c
     apu_hrtf_tap.c
+    apu_reverb.cpp
 )
 
 target_include_directories(apu_emu PRIVATE
