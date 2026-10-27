@@ -274,6 +274,33 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
     }
 
     /*
+     * Reserve the rest of the hardware windows (Xbox VA 0xFE000000-0xFE7FFFFF
+     * and 0xFE880000-0xFFFEFFFF: MCPX devices such as the AC97 controller at
+     * 0xFEC00000, the 0xFED00000 page the game reads at boot, the flash ROM).
+     * The game reads them expecting the zero pages the fault handler commits
+     * (main.c), but unreserved they are free host address space: with MSAA on,
+     * the GPU driver's larger allocations landed on 0xFED00000, the boot read
+     * the driver's data instead of zeros, took another path and hung.
+     * Reserved, a first access still faults and gets its zero page.
+     */
+    {
+        static const struct { uint32_t va, size; } hw[] = {
+            { 0xFE000000u, 0x00800000u },
+            { 0xFE880000u, 0x01770000u },     /* up to 0xFFFF0000 */
+        };
+        for (unsigned i = 0; i < sizeof hw / sizeof hw[0]; i++) {
+            void *at = (void *)((uintptr_t)hw[i].va + g_memory_offset);
+            LPVOID r = VirtualAlloc(at, hw[i].size, MEM_RESERVE, PAGE_NOACCESS);
+            if (r != at) {
+                fprintf(stderr, "xbox_MemoryLayoutInit: WARNING could not reserve the hardware "
+                                "window at Xbox VA 0x%08X (got %p, error %lu)\n",
+                        (unsigned)hw[i].va, r, GetLastError());
+                if (r) VirtualFree(r, 0, MEM_RELEASE);
+            }
+        }
+    }
+
+    /*
      * Helper macro: convert Xbox VA to actual mapped address.
      * When g_memory_offset == 0 (ideal case), this is identity.
      */
