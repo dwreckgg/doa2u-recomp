@@ -199,10 +199,14 @@ static inline float run_svf(sv_filter *sv, float in) {
 #define HRTF_NUM_TAPS           31
 #define HRTF_MAX_DELAY_SAMPLES  42
 #define HRTF_BUFLEN             (HRTF_NUM_TAPS + HRTF_MAX_DELAY_SAMPLES)
-#define HRTF_PARAM_SMOOTH_ALPHA 0.01f
 
+/* A new filter (taps and delay) steps in over one 32-sample frame, as the
+ * MCPX voice processor does; a voice's first frame starts at its entry's
+ * values. */
 typedef struct {
     int buf_pos;
+    int primed;                /* cur holds a filter (set at the first target) */
+    int ramping;               /* cur differs from tar: ramp over the next frame */
     struct {
         float buf[HRTF_BUFLEN];
         float hrir_coeff_cur[HRTF_NUM_TAPS];
@@ -218,49 +222,55 @@ static inline void hrtf_filter_init(HrtfFilter *f) {
 
 static inline void hrtf_filter_clear_history(HrtfFilter *f) {
     f->buf_pos = 0;
+    f->primed = 0;
+    f->ramping = 0;
     memset(f->ch[0].buf, 0, sizeof(f->ch[0].buf));
     memset(f->ch[1].buf, 0, sizeof(f->ch[1].buf));
 }
 
+/* The taps are the hardware's values (apu_hrtf_tap.c), applied unnormalised. */
 static inline void
 hrtf_filter_set_target_params(HrtfFilter *f, float hrir_coeff[2][HRTF_NUM_TAPS],
                               float itd) {
     f->itd_tar = fmaxf(-(float)HRTF_MAX_DELAY_SAMPLES,
                         fminf(itd, (float)HRTF_MAX_DELAY_SAMPLES));
-    for (int ch = 0; ch < 2; ch++) {
-        float *coeff = f->ch[ch].hrir_coeff_tar;
-        memcpy(coeff, hrir_coeff[ch], sizeof(f->ch[ch].hrir_coeff_tar));
-        float s = 0.0f;
-        for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-            s += fabsf(coeff[k]);
-        }
-        if (s == 0.0f || s == 1.0f) break;
-        for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-            coeff[k] /= s;
-        }
+    for (int ch = 0; ch < 2; ch++)
+        memcpy(f->ch[ch].hrir_coeff_tar, hrir_coeff[ch], sizeof(f->ch[ch].hrir_coeff_tar));
+    if (!f->primed) {
+        for (int ch = 0; ch < 2; ch++)
+            memcpy(f->ch[ch].hrir_coeff_cur, f->ch[ch].hrir_coeff_tar, sizeof(f->ch[ch].hrir_coeff_cur));
+        f->itd_cur = f->itd_tar;
+        f->primed = 1;
+        f->ramping = 0;
+        return;
     }
-}
-
-static inline float hrtf_filter_smooth_param(float cur, float tar) {
-    return cur + HRTF_PARAM_SMOOTH_ALPHA * (tar - cur);
-}
-
-static inline void hrtf_filter_step_parameters(HrtfFilter *f) {
-    for (int ch = 0; ch < 2; ch++) {
-        float *cc = f->ch[ch].hrir_coeff_cur;
-        float *ct = f->ch[ch].hrir_coeff_tar;
-        for (int k = 0; k < HRTF_NUM_TAPS; k++) {
-            cc[k] = hrtf_filter_smooth_param(cc[k], ct[k]);
-        }
-    }
-    f->itd_cur = hrtf_filter_smooth_param(f->itd_cur, f->itd_tar);
+    f->ramping = f->itd_cur != f->itd_tar ||
+                 memcmp(f->ch[0].hrir_coeff_cur, f->ch[0].hrir_coeff_tar, sizeof(f->ch[0].hrir_coeff_cur)) ||
+                 memcmp(f->ch[1].hrir_coeff_cur, f->ch[1].hrir_coeff_tar, sizeof(f->ch[1].hrir_coeff_cur));
 }
 
 static inline void hrtf_filter_process(HrtfFilter *f,
                                        float in[][2],
                                        float out[][2]) {
+    /* A changed filter steps from the frame-start values to the new ones
+     * across this frame; otherwise the taps stay put. */
+    float start[2][HRTF_NUM_TAPS], step[2][HRTF_NUM_TAPS], itd_start = f->itd_cur, itd_step = 0.0f;
+    const int ramp = f->ramping;
+    if (ramp) {
+        for (int ch = 0; ch < 2; ch++)
+            for (int k = 0; k < HRTF_NUM_TAPS; k++) {
+                start[ch][k] = f->ch[ch].hrir_coeff_cur[k];
+                step[ch][k] = (f->ch[ch].hrir_coeff_tar[k] - start[ch][k]) / (float)HRTF_SAMPLES_PER_FRAME;
+            }
+        itd_step = (f->itd_tar - itd_start) / (float)HRTF_SAMPLES_PER_FRAME;
+    }
     for (int n = 0; n < HRTF_SAMPLES_PER_FRAME; n++) {
-        hrtf_filter_step_parameters(f);
+        if (ramp) {
+            for (int ch = 0; ch < 2; ch++)
+                for (int k = 0; k < HRTF_NUM_TAPS; k++)
+                    f->ch[ch].hrir_coeff_cur[k] = start[ch][k] + step[ch][k] * (float)(n + 1);
+            f->itd_cur = itd_start + itd_step * (float)(n + 1);
+        }
         for (int ch = 0; ch < 2; ch++) {
             float *buf = f->ch[ch].buf;
             float *coeff = f->ch[ch].hrir_coeff_cur;
@@ -282,6 +292,12 @@ static inline void hrtf_filter_process(HrtfFilter *f,
             out[n][ch] = acc;
         }
         f->buf_pos = (f->buf_pos + 1) % HRTF_BUFLEN;
+    }
+    if (ramp) {                             /* land exactly on the target */
+        for (int ch = 0; ch < 2; ch++)
+            memcpy(f->ch[ch].hrir_coeff_cur, f->ch[ch].hrir_coeff_tar, sizeof(f->ch[ch].hrir_coeff_cur));
+        f->itd_cur = f->itd_tar;
+        f->ramping = 0;
     }
 }
 

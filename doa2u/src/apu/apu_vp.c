@@ -20,6 +20,7 @@
  */
 
 #include "apu_resample.h"
+#include "apu_hrtf_tap.h"
 #include "apu_state.h"
 #include "fpconv.h"
 
@@ -187,7 +188,7 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
                                int8_t value)
 {
     int entry = d->vp.hrtf.current_entry;
-    d->vp.hrtf.entries[entry].hrir[channel][coeff_idx] = int8_to_float(value);
+    d->vp.hrtf.entries[entry].hrir[channel][coeff_idx] = apu_hrtf_tap((unsigned char)value);
 }
 
 /* Unlink a voice handle from whichever voice list holds it, patching either
@@ -1208,13 +1209,23 @@ static void voice_process(MCPXAPUState *d,
         }
     }
 
-    /* HRTF processing for 3D voices */
+    /* HRTF processing for 3D voices: the filter makes a left and a right ear
+     * from the (mono) voice. Routes 0-3 of a 3D voice are the HRTF submixes
+     * left front, left back, right front, right back, so route b takes ear
+     * b >> 1. */
+    int hrtf_ears = 0;
     if (v < MCPX_HW_MAX_3D_VOICES && g_config.audio.hrtf) {
         uint16_t hrtf_handle =
             (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CFG_HRTF_TARGET,
                                      NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE);
-        if (hrtf_handle != HRTF_NULL_HANDLE) {
+        if (hrtf_handle != HRTF_NULL_HANDLE && hrtf_handle < HRTF_ENTRY_COUNT) {
+            /* The voice reads its entry every frame: a changed entry steps in
+             * over this frame. */
+            hrtf_filter_set_target_params(&d->vp.filters[v].hrtf,
+                                          d->vp.hrtf.entries[hrtf_handle].hrir,
+                                          d->vp.hrtf.entries[hrtf_handle].itd);
             hrtf_filter_process(&d->vp.filters[v].hrtf, samples, samples);
+            hrtf_ears = 1;
         }
     }
 
@@ -1228,8 +1239,9 @@ static void voice_process(MCPXAPUState *d,
             hr = (float)(1 << d->vp.submix_headroom[bin[b]]);
         }
         g *= attenuate(vol[b]) / hr;
+        const int src = (hrtf_ears && b < 4) ? (b >> 1) : (int)(b % channels);
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
-            mixbins[bin[b]][i] += g * samples[i][b % channels];
+            mixbins[bin[b]][i] += g * samples[i][src];
         }
     }
 

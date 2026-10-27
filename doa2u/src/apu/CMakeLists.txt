@@ -13,6 +13,7 @@ add_library(apu_emu STATIC
     apu_xaudio2.c
     apu_downmix.c
     apu_resample.c
+    apu_hrtf_tap.c
 )
 
 target_include_directories(apu_emu PRIVATE
