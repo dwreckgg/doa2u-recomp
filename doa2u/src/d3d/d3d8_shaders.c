@@ -21,9 +21,130 @@
 #include <d3dcompiler.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 
 #pragma comment(lib, "d3dcompiler.lib")
+
+/* Shader bytecode cache on disk, keyed by a hash of source, entry, target, flags
+ * and macros: runtime shaders compile once ever. Records: (key u64, size u32, code). */
+
+#define SHC_FILE  "assets/doa2u_shader_cache.bin"   /* cwd is the exe folder (main.c) */
+#define SHC_MAGIC 0x31434853u            /* "SHC1" */
+#define SHC_MAX   (32u * 1024u * 1024u)  /* start over past this */
+
+typedef struct { unsigned long long key; size_t off; unsigned size; } ShcEntry;
+static ShcEntry      *g_shc;
+static unsigned       g_shc_n, g_shc_cap;
+static unsigned char *g_shc_data;
+static size_t         g_shc_used, g_shc_datacap;
+static FILE          *g_shc_file;
+static int            g_shc_loaded;
+
+static unsigned long long shc_fnv(unsigned long long h, const void *p, size_t n)
+{
+    const unsigned char *b = (const unsigned char *)p;
+    while (n--) { h ^= *b++; h *= 1099511628211ull; }
+    return h;
+}
+
+static int shc_add(unsigned long long key, const void *code, unsigned size)
+{
+    if (g_shc_n == g_shc_cap) {
+        unsigned cap = g_shc_cap ? g_shc_cap * 2 : 256;
+        void *p = realloc(g_shc, cap * sizeof *g_shc);
+        if (!p) return 0;
+        g_shc = p; g_shc_cap = cap;
+    }
+    if (g_shc_used + size > g_shc_datacap) {
+        size_t cap = g_shc_datacap ? g_shc_datacap : 1u << 20;
+        void *p;
+        while (cap < g_shc_used + size) cap *= 2;
+        if (!(p = realloc(g_shc_data, cap))) return 0;
+        g_shc_data = p; g_shc_datacap = cap;
+    }
+    memcpy(g_shc_data + g_shc_used, code, size);
+    g_shc[g_shc_n].key = key; g_shc[g_shc_n].off = g_shc_used; g_shc[g_shc_n].size = size;
+    g_shc_n++;
+    g_shc_used += size;
+    return 1;
+}
+
+static void shc_write(unsigned long long key, const void *code, unsigned size)
+{
+    if (!g_shc_file) return;
+    fwrite(&key, sizeof key, 1, g_shc_file);
+    fwrite(&size, sizeof size, 1, g_shc_file);
+    fwrite(code, 1, size, g_shc_file);
+    fflush(g_shc_file);
+}
+
+/* Read the file; a missing, foreign, oversized or damaged one is rewritten from
+ * what could be read, so later appends always follow a complete record. */
+static void shc_load(void)
+{
+    FILE *f = fopen(SHC_FILE, "rb");
+    int clean = 0;
+    unsigned i;
+    g_shc_loaded = 1;
+    if (f) {
+        unsigned magic = 0, size;
+        unsigned long long key;
+        if (fread(&magic, sizeof magic, 1, f) == 1 && magic == SHC_MAGIC) {
+            clean = 1;
+            for (;;) {
+                unsigned char *buf;
+                if (fread(&key, sizeof key, 1, f) != 1) break;           /* end of file */
+                if (fread(&size, sizeof size, 1, f) != 1 || !size || size > SHC_MAX) { clean = 0; break; }
+                if (!(buf = malloc(size))) { clean = 0; break; }
+                if (fread(buf, 1, size, f) != size) { free(buf); clean = 0; break; }
+                if (!shc_add(key, buf, size)) { free(buf); clean = 0; break; }
+                free(buf);
+            }
+        }
+        fclose(f);
+    }
+    if (g_shc_used > SHC_MAX) { g_shc_n = 0; g_shc_used = 0; clean = 0; }
+    if (clean) { g_shc_file = fopen(SHC_FILE, "ab"); return; }
+    if ((g_shc_file = fopen(SHC_FILE, "wb"))) {
+        unsigned magic = SHC_MAGIC;
+        fwrite(&magic, sizeof magic, 1, g_shc_file);
+        for (i = 0; i < g_shc_n; i++) shc_write(g_shc[i].key, g_shc_data + g_shc[i].off, g_shc[i].size);
+    }
+}
+
+HRESULT d3d8_CompileCached(const char *src, SIZE_T len, const char *name, const D3D_SHADER_MACRO *defs,
+                           const char *entry, const char *target, UINT flags,
+                           ID3DBlob **code, ID3DBlob **errors)
+{
+    unsigned long long key = 14695981039346656037ull;
+    HRESULT hr;
+    unsigned i;
+
+    if (errors) *errors = NULL;
+    key = shc_fnv(key, src, len);
+    key = shc_fnv(key, entry, strlen(entry) + 1);
+    key = shc_fnv(key, target, strlen(target) + 1);
+    key = shc_fnv(key, &flags, sizeof flags);
+    for (; defs && defs->Name; defs++) {
+        key = shc_fnv(key, defs->Name, strlen(defs->Name) + 1);
+        if (defs->Definition) key = shc_fnv(key, defs->Definition, strlen(defs->Definition) + 1);
+    }
+    if (!g_shc_loaded) shc_load();
+    for (i = 0; i < g_shc_n; i++)
+        if (g_shc[i].key == key && SUCCEEDED(D3DCreateBlob(g_shc[i].size, code))) {
+            memcpy(ID3D10Blob_GetBufferPointer(*code), g_shc_data + g_shc[i].off, g_shc[i].size);
+            return S_OK;
+        }
+
+    hr = D3DCompile(src, len, name, defs, NULL, entry, target, flags, 0, code, errors);
+    if (SUCCEEDED(hr) && *code) {
+        const void *p = ID3D10Blob_GetBufferPointer(*code);
+        unsigned size = (unsigned)ID3D10Blob_GetBufferSize(*code);
+        if (shc_add(key, p, size)) shc_write(key, p, size);
+    }
+    return hr;
+}
 
 /* ================================================================
  * HLSL vertex shader (embedded)
@@ -983,6 +1104,8 @@ void d3d8_shaders_prepare_draw(DWORD fvf)
  * folded into Clip[]; nv_light_vertex is ported line for line; colours are
  * quantised to 8 bits the way nv_pack_color does before interpolation; the
  * combiner-factor fold uses the same integer rounding.
+ * Compiled a second time with NV2A_TS=1 for texture-shader draws: four stages of
+ * nv_build_array_vertex's texgen and the specular colour, for nv2a_ps.
  * ================================================================ */
 static const char g_nv2aff_vs_source[] =
     "cbuffer NvFF : register(b0) {\n"
@@ -996,12 +1119,26 @@ static const char g_nv2aff_vs_source[] =
     "    float4 Fold;\n"
     "    uint   Flags;\n"
     "    uint3  _pad;\n"
+    "#if NV2A_TS\n"
+    "    float4 TG[16];\n"                          /* [stage * 4 + component]: eye-linear plane */
+    "    float4 TM[16];\n"                          /* [stage * 4 + row]: texture matrix */
+    "    float4 TS[4];\n"                           /* texel scale */
+    "    uint4  SF;\n"                              /* stage flags */
+    "#endif\n"
     "};\n"
     "struct VS_IN {\n"
     "    float4 pos   : POSITION;\n"
     "    float3 nrm   : NORMAL;\n"
     "    float4 color : COLOR0;\n"
+    "#if NV2A_TS\n"
+    "    float4 spec  : COLOR1;\n"
+    "    float4 t0    : TEXCOORD0;\n"
+    "    float4 t1    : TEXCOORD1;\n"
+    "    float4 t2    : TEXCOORD2;\n"
+    "    float4 t3    : TEXCOORD3;\n"
+    "#else\n"
     "    float2 uv    : TEXCOORD0;\n"
+    "#endif\n"
     "};\n"
     "struct VS_OUT {\n"
     "    float4 pos      : SV_POSITION;\n"
@@ -1012,6 +1149,10 @@ static const char g_nv2aff_vs_source[] =
     "    float2 tex2     : TEXCOORD2;\n"
     "    float2 tex3     : TEXCOORD3;\n"
     "    float  fog      : TEXCOORD4;\n"
+    "#if NV2A_TS\n"
+    "    float4 texq     : TEXCOORD5;\n"
+    "    float4 texr     : TEXCOORD6;\n"
+    "#endif\n"
     "    float2 clipd    : SV_ClipDistance0;\n"
     "};\n"
     "float4 quant(float4 c) {\n"                 /* nv_pack_color: (int)(c*255+0.5) clamped */
@@ -1063,23 +1204,93 @@ static const char g_nv2aff_vs_source[] =
     "        col = floor((c8 * Fold + 127.0) / 255.0) / 255.0;\n"
     "    }\n"
     "    o.diffuse = col;\n"
+    "    o.fog = 1.0;\n"
+    "#if NV2A_TS\n"
+    /* nv_build_array_vertex's s_tc_want block: eye-linear planes then the
+     * texture matrix, or REFLECTION_MAP; then the texel scale. */
+    "    float4 E = float4(dot(MV[0].xyz, i.pos.xyz) + MV[0].w, dot(MV[1].xyz, i.pos.xyz) + MV[1].w,\n"
+    "                      dot(MV[2].xyz, i.pos.xyz) + MV[2].w, 1.0);\n"
+    "    float3 RP = E.xyz, RN = float3(dot(MV[0].xyz, i.nrm), dot(MV[1].xyz, i.nrm), dot(MV[2].xyz, i.nrm));\n"
+    "    float rl = sqrt(dot(RP, RP));\n"
+    "    if (rl > 1e-12) RP = RP / rl;\n"
+    "    rl = sqrt(dot(RN, RN));\n"
+    "    if (rl > 1e-12) RN = RN / rl;\n"
+    "    float4 R = float4(RP - 2.0 * dot(RP, RN) * RN, 1.0);\n"
+    "    float2 tc[4];\n"
+    "    float4 q = float4(1, 1, 1, 1), r = float4(0, 0, 0, 0);\n"
+    "    [unroll] for (int t = 0; t < 4; t++) {\n"
+    "        float4 tex = (t == 0) ? i.t0 : (t == 1) ? i.t1 : (t == 2) ? i.t2 : i.t3;\n"
+    "        uint sf = SF[t];\n"
+    "        if (sf & 1u) {\n"
+    "            [unroll] for (int c = 0; c < 4; c++)\n"
+    "                if (sf & (2u << c)) tex[c] = dot(TG[t * 4 + c], E);\n"
+    "            tex = float4(dot(TM[t * 4], tex), dot(TM[t * 4 + 1], tex),\n"
+    "                         dot(TM[t * 4 + 2], tex), dot(TM[t * 4 + 3], tex));\n"
+    "        } else {\n"
+    "            tex.w = 1.0;\n"
+    "        }\n"
+    "        tc[t] = tex.xy; r[t] = tex.z; q[t] = tex.w;\n"
+    "        if ((sf & 0x20u) && (Flags & 0x10u))\n"
+    "            tc[t] = (sf & 0x40u) ? float2(dot(TM[t * 4], R), dot(TM[t * 4 + 1], R)) : R.xy;\n"
+    "        tc[t] *= TS[t].xy;\n"
+    "    }\n"
+    "    o.specular = i.spec;\n"
+    "    o.tex0 = tc[0];\n"
+    "    o.tex1 = tc[1];\n"
+    "    o.tex2 = tc[2];\n"
+    "    o.tex3 = tc[3];\n"
+    "    o.texq = q;\n"
+    "    o.texr = r;\n"
+    "#else\n"
     "    o.specular = float4(0, 0, 0, 0);\n"
     "    o.tex0 = i.uv;\n"
     "    o.tex1 = i.uv;\n"
     "    o.tex2 = i.uv;\n"
     "    o.tex3 = i.uv;\n"
-    "    o.fog = 1.0;\n"
+    "#endif\n"
     "    return o;\n"
     "}\n";
 
-static ID3D11VertexShader *g_nv2aff_vs;
-static ID3D11InputLayout  *g_nv2aff_layout;
-static ID3D11Buffer       *g_nv2aff_cb;
+static ID3D11VertexShader *g_nv2aff_vs, *g_nv2ats_vs;
+static ID3D11InputLayout  *g_nv2aff_layout, *g_nv2ats_layout;
+static ID3D11Buffer       *g_nv2aff_cb, *g_nv2ats_cb;
 
-long d3d8_Nv2aFF_Init(void)
+/* One variant of the shader: compile, create it, its layout and its constant buffer. */
+static HRESULT nv2aff_build(const char *ts, const D3D11_INPUT_ELEMENT_DESC *elems, UINT n, UINT cb_size,
+                            ID3D11VertexShader **vs, ID3D11InputLayout **layout, ID3D11Buffer **cb)
 {
     ID3DBlob *blob = NULL, *errors = NULL;
     D3D11_BUFFER_DESC cbd;
+    D3D_SHADER_MACRO defs[] = { { "NV2A_TS", ts }, { NULL, NULL } };
+    HRESULT hr;
+
+    hr = D3DCompile(g_nv2aff_vs_source, strlen(g_nv2aff_vs_source), "vs_nv2aff",
+                    defs, NULL, "main", "vs_5_0", 0, 0, &blob, &errors);
+    if (FAILED(hr)) {
+        if (errors) {
+            fprintf(stderr, "nv2aff VS (NV2A_TS=%s) compile failed: %s\n", ts, (const char *)ID3D10Blob_GetBufferPointer(errors));
+            ID3D10Blob_Release(errors);
+        }
+        return hr;
+    }
+    hr = ID3D11Device_CreateVertexShader(d3d8_GetD3D11Device(),
+        ID3D10Blob_GetBufferPointer(blob), ID3D10Blob_GetBufferSize(blob), NULL, vs);
+    if (SUCCEEDED(hr))
+        hr = ID3D11Device_CreateInputLayout(d3d8_GetD3D11Device(), elems, n,
+            ID3D10Blob_GetBufferPointer(blob), ID3D10Blob_GetBufferSize(blob), layout);
+    ID3D10Blob_Release(blob);
+    if (FAILED(hr)) return hr;
+
+    memset(&cbd, 0, sizeof cbd);
+    cbd.ByteWidth = (cb_size + 15) & ~15u;
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    return ID3D11Device_CreateBuffer(d3d8_GetD3D11Device(), &cbd, NULL, cb);
+}
+
+long d3d8_Nv2aFF_Init(void)
+{
     HRESULT hr;
     static const D3D11_INPUT_ELEMENT_DESC elems[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
@@ -1087,30 +1298,23 @@ long d3d8_Nv2aFF_Init(void)
         { "COLOR",    0, DXGI_FORMAT_B8G8R8A8_UNORM,     0, 28, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
     };
+    static const D3D11_INPUT_ELEMENT_DESC ts_elems[] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR",    0, DXGI_FORMAT_B8G8R8A8_UNORM,     0, 28, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR",    1, DXGI_FORMAT_B8G8R8A8_UNORM,     0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 36, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 52, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 2, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 68, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 3, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 84, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+    };
 
-    hr = D3DCompile(g_nv2aff_vs_source, strlen(g_nv2aff_vs_source), "vs_nv2aff",
-                    NULL, NULL, "main", "vs_5_0", 0, 0, &blob, &errors);
-    if (FAILED(hr)) {
-        if (errors) {
-            fprintf(stderr, "nv2aff VS compile failed: %s\n", (const char *)ID3D10Blob_GetBufferPointer(errors));
-            ID3D10Blob_Release(errors);
-        }
-        return hr;
-    }
-    hr = ID3D11Device_CreateVertexShader(d3d8_GetD3D11Device(),
-        ID3D10Blob_GetBufferPointer(blob), ID3D10Blob_GetBufferSize(blob), NULL, &g_nv2aff_vs);
-    if (SUCCEEDED(hr))
-        hr = ID3D11Device_CreateInputLayout(d3d8_GetD3D11Device(), elems, 4,
-            ID3D10Blob_GetBufferPointer(blob), ID3D10Blob_GetBufferSize(blob), &g_nv2aff_layout);
-    ID3D10Blob_Release(blob);
+    hr = nv2aff_build("0", elems, 4, sizeof(Nv2aFFConstants), &g_nv2aff_vs, &g_nv2aff_layout, &g_nv2aff_cb);
     if (FAILED(hr)) return hr;
-
-    memset(&cbd, 0, sizeof cbd);
-    cbd.ByteWidth = (sizeof(Nv2aFFConstants) + 15) & ~15u;
-    cbd.Usage = D3D11_USAGE_DYNAMIC;
-    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    return ID3D11Device_CreateBuffer(d3d8_GetD3D11Device(), &cbd, NULL, &g_nv2aff_cb);
+    /* Without it texture-shader draws stay on the CPU path. */
+    if (FAILED(nv2aff_build("1", ts_elems, 8, sizeof(Nv2aTSConstants), &g_nv2ats_vs, &g_nv2ats_layout, &g_nv2ats_cb)))
+        fprintf(stderr, "nv2aff: texture-shader VS unavailable\n");
+    return hr;
 }
 
 void d3d8_Nv2aFF_Shutdown(void)
@@ -1118,6 +1322,9 @@ void d3d8_Nv2aFF_Shutdown(void)
     if (g_nv2aff_cb)     { ID3D11Buffer_Release(g_nv2aff_cb); g_nv2aff_cb = NULL; }
     if (g_nv2aff_layout) { ID3D11InputLayout_Release(g_nv2aff_layout); g_nv2aff_layout = NULL; }
     if (g_nv2aff_vs)     { ID3D11VertexShader_Release(g_nv2aff_vs); g_nv2aff_vs = NULL; }
+    if (g_nv2ats_cb)     { ID3D11Buffer_Release(g_nv2ats_cb); g_nv2ats_cb = NULL; }
+    if (g_nv2ats_layout) { ID3D11InputLayout_Release(g_nv2ats_layout); g_nv2ats_layout = NULL; }
+    if (g_nv2ats_vs)     { ID3D11VertexShader_Release(g_nv2ats_vs); g_nv2ats_vs = NULL; }
 }
 
 /* Bind the NV2A VS, its layout and constants. The PS side (shader, PS
@@ -1135,5 +1342,20 @@ int d3d8_Nv2aFF_Bind(const Nv2aFFConstants *cb)
     ID3D11DeviceContext_VSSetShader(ctx, g_nv2aff_vs, NULL, 0);
     ID3D11DeviceContext_IASetInputLayout(ctx, g_nv2aff_layout);
     ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_nv2aff_cb);
+    return 1;
+}
+
+int d3d8_Nv2aTS_Bind(const Nv2aTSConstants *cb)
+{
+    ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (!ctx || !g_nv2ats_vs || !g_nv2ats_cb) return 0;
+    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_nv2ats_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+        return 0;
+    memcpy(mapped.pData, cb, sizeof *cb);
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_nv2ats_cb, 0);
+    ID3D11DeviceContext_VSSetShader(ctx, g_nv2ats_vs, NULL, 0);
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_nv2ats_layout);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_nv2ats_cb);
     return 1;
 }

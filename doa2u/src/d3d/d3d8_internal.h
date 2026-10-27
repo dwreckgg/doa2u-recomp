@@ -136,6 +136,10 @@ HRESULT d3d8_CreateTextureImpl(UINT Width, UINT Height, UINT Levels, DWORD Usage
 
 HRESULT d3d8_shaders_init(void);
 void    d3d8_shaders_shutdown(void);
+/* D3DCompile through the on-disk bytecode cache (assets/doa2u_shader_cache.bin). */
+HRESULT d3d8_CompileCached(const char *src, SIZE_T len, const char *name, const D3D_SHADER_MACRO *defs,
+                           const char *entry, const char *target, UINT flags,
+                           ID3DBlob **code, ID3DBlob **errors);
 
 /* Bind shaders + input layout for the given FVF, upload transform CBs */
 void    d3d8_shaders_prepare_draw(DWORD fvf);

@@ -807,10 +807,8 @@ static ID3D11PixelShader *compile_combiner_shader(const NV2ACombinerState *state
         return NULL;
     }
 
-    hr = D3DCompile(hlsl, (SIZE_T)len, "ps_combiner",
-                    NULL, NULL, "main", "ps_5_0",
-                    D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-                    &code, &errors);
+    hr = d3d8_CompileCached(hlsl, (SIZE_T)len, "ps_combiner", NULL, "main", "ps_5_0",
+                            D3DCOMPILE_OPTIMIZATION_LEVEL3, &code, &errors);
     if (FAILED(hr)) {
         fprintf(stderr, "NV2A combiners: HLSL compile failed: %s\n",
                 errors ? (char *)ID3D10Blob_GetBufferPointer(errors)
@@ -1142,8 +1140,11 @@ int d3d8_Nv2aPS_Arm(const Nv2aPSKey *key, const Nv2aPSConsts *cb)
         char hlsl[24576];
         ID3DBlob *code = NULL, *err = NULL;
         int len = n2ps_generate(key, hlsl, sizeof hlsl);
-        if (len > 0 && SUCCEEDED(D3DCompile(hlsl, (SIZE_T)len, "nv2a_ps", NULL, NULL, "main", "ps_5_0",
-                                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err))) {
+        HRESULT hr = E_FAIL;
+        if (len > 0)
+            hr = d3d8_CompileCached(hlsl, (SIZE_T)len, "nv2a_ps", NULL, "main", "ps_5_0",
+                                    D3DCOMPILE_OPTIMIZATION_LEVEL3, &code, &err);
+        if (len > 0 && SUCCEEDED(hr)) {
             if (FAILED(ID3D11Device_CreatePixelShader(d3d8_GetD3D11Device(), ID3D10Blob_GetBufferPointer(code),
                                                       ID3D10Blob_GetBufferSize(code), NULL, &ps))) ps = NULL;
         } else if (len > 0) {
