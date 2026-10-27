@@ -8,6 +8,7 @@
 #include "video_settings.h"
 #include "../kernel/kernel.h"
 #include "../kernel/perf.h"
+#include "log_rotate.h"
 
 static int g_enabled = 0;
 static int g_own_stderr = 0;   /* stderr was a console or absent, so it is ours to route */
@@ -34,6 +35,10 @@ void doa2u_log_init(void)
                    GetConsoleMode(herr, &cmode);
     g_enabled = GetPrivateProfileIntA("General", "Logging", 1,   /* on during bring-up */
                                       doa2u_settings_ini_path()) != 0;
+    /* the last run's log becomes doa2u_log.1.txt (five are kept): the game
+     * restarts itself into and out of an online session, which would
+     * otherwise wipe the session's log */
+    if (g_own_stderr && g_enabled) log_rotate("doa2u_log.txt", 5);
     route_stderr();
 }
 

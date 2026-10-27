@@ -27,6 +27,7 @@ set(GAME_SOURCES
     xiso_extract.c           # first-run install of the game files from a disc image
     ${CMAKE_SOURCE_DIR}/src/ui/video_settings.c
     ${CMAKE_SOURCE_DIR}/src/ui/log_settings.c
+    ${CMAKE_SOURCE_DIR}/src/ui/log_rotate.c
     ${CMAKE_SOURCE_DIR}/src/ui/profile_settings.c
     ${CMAKE_SOURCE_DIR}/src/ui/extras.c
     recomp/recomp_manual.c
@@ -116,6 +117,7 @@ doa2u_host_test(online_settings_test ${ONLINE_DIR}/online_settings.c ${CMAKE_SOU
 doa2u_host_test(netplay_dump_test ${ONLINE_DIR}/netplay_dump.c ${CMAKE_SOURCE_DIR}/tests/netplay_dump_test.c)
 doa2u_host_test(netplay_memdiff ${ONLINE_DIR}/netplay_dump.c ${CMAKE_SOURCE_DIR}/tests/netplay_memdiff.c)
 doa2u_host_test(join_code_test ${ONLINE_DIR}/join_code.c ${CMAKE_SOURCE_DIR}/tests/join_code_test.c)
+doa2u_host_test(log_rotate_test ${CMAKE_SOURCE_DIR}/src/ui/log_rotate.c ${CMAKE_SOURCE_DIR}/tests/log_rotate_test.c)
 doa2u_host_test(netplay_handoff_test ${ONLINE_DIR}/netplay_handoff.c ${CMAKE_SOURCE_DIR}/tests/netplay_handoff_test.c)
 doa2u_host_test(netplay_session_test ${ONLINE_DIR}/netplay_session.c ${ONLINE_DIR}/netplay_format.c
                 ${ONLINE_DIR}/online_settings.c ${CMAKE_SOURCE_DIR}/tests/netplay_session_test.c
