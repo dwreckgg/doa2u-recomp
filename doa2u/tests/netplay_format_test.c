@@ -14,6 +14,23 @@ static void fill(uint8_t *b, uint32_t n, uint8_t start)
     for (i = 0; i < n; i++) b[i] = (uint8_t)(start + 7 * i);
 }
 
+/* The identity two games compare before playing: the same commit built
+ * cleanly anywhere matches; a modified tree or a build without git keeps the
+ * per-link stamp, so it only matches the very same exe. */
+static void test_build_id(void)
+{
+    const char *a = "6c1d9c44238b6005ed8f54c46aeeaba5836464c7";
+    const char *b = "ebb4ff8c6d05b9d5a0f4d1fe693219de6eba3174";
+    CHECK(np_build_id(a, 0, 0x6AE12D92u) == np_build_id(a, 0, 0x6AE12E17u));   /* two builds of one commit */
+    CHECK(np_build_id(a, 0, 1) != np_build_id(b, 0, 1));                        /* another commit */
+    CHECK(np_build_id(a, 1, 0x6AE12D92u) == 0x6AE12D92u);                       /* local edits: the link stamp */
+    CHECK(np_build_id(a, 1, 0x6AE12D92u) != np_build_id(a, 1, 0x6AE12E17u));
+    CHECK(np_build_id("", 0, 0x6AE12D92u) == 0x6AE12D92u);                      /* no git */
+    CHECK(np_build_id(NULL, 0, 0x6AE12D92u) == 0x6AE12D92u);
+    CHECK(np_build_id("abc", 0, 0x6AE12D92u) == 0x6AE12D92u);                   /* not a commit */
+    CHECK(np_build_id(a, 0, 1) != 0);
+}
+
 /* Every field distinct and non-zero, so a swapped or dropped field shows. */
 static void make_params(np_params *p, uint32_t save_len, uint32_t sync_len)
 {
@@ -167,6 +184,7 @@ int main(void)
     test_regions();
     test_blob();
     test_replay();
+    test_build_id();
     printf("netplay_format_test: %d failure(s)\n", failures);
     return failures;
 }

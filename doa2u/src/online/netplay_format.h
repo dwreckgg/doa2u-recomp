@@ -55,6 +55,11 @@ typedef struct {
 } np_params;
 
 uint32_t np_fnv32(uint32_t h, const void *p, uint32_t len);
+
+/* The build identity two games compare before a session: derived from the
+ * git commit when the tree was clean (any build of that commit matches),
+ * else the exe's link stamp (only the very same exe matches). */
+uint32_t np_build_id(const char *commit, int dirty, uint32_t link_stamp);
 /* Folds the per-region hashes of one frame into its digest (order matters). */
 uint64_t np_digest_combine(const uint32_t *hashes, int n);
 

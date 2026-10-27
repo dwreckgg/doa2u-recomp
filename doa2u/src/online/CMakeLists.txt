@@ -64,8 +64,19 @@ add_library(doa2u_online STATIC
 
 target_include_directories(doa2u_online
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}
-    PRIVATE ${CMAKE_SOURCE_DIR}/src
+    PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
+
+# The build identity two games compare before a session (cmake/np_build_id.cmake),
+# refreshed on every build.
+find_package(Git QUIET)
+add_custom_target(np_build_id
+    COMMAND ${CMAKE_COMMAND} -DGIT=${GIT_EXECUTABLE} -DSRC=${CMAKE_SOURCE_DIR}
+            -DOUT=${CMAKE_CURRENT_BINARY_DIR}/generated/np_build_id.h
+            -P ${CMAKE_SOURCE_DIR}/cmake/np_build_id.cmake
+    BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/generated/np_build_id.h
+    COMMENT "Online play build identity")
+add_dependencies(doa2u_online np_build_id)
 
 target_link_libraries(doa2u_online PUBLIC gekkonet miniupnpc ws2_32 iphlpapi)
 

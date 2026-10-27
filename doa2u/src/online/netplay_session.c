@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "netplay_session.h"
+#include "netplay_format.h"
+#include "np_build_id.h"   /* generated: cmake/np_build_id.cmake */
 #include "netplay_game.h"
 #include "online_settings.h"
 #include "kernel/xbox_det.h"
@@ -231,12 +233,22 @@ static void record_frame(const np_pad in[2])
 
 /* ── files ──────────────────────────────────────────────────────────── */
 
+/* Both games must run the same code: any clean build of the same doa2u
+ * source tree matches (np_build_id.h, written by cmake/np_build_id.cmake);
+ * a modified tree or a build without git only matches the very same exe. */
 static uint32_t build_stamp(void)
 {
-    const uint8_t *base = (const uint8_t *)GetModuleHandleW(NULL);
-    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
-    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
-    return nt->FileHeader.TimeDateStamp;
+    static uint32_t id;
+    if (!id) {
+        const uint8_t *base = (const uint8_t *)GetModuleHandleW(NULL);
+        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
+        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+        id = np_build_id(NP_BUILD_TREE, NP_BUILD_DIRTY, nt->FileHeader.TimeDateStamp);
+        fprintf(stderr, "[netplay] build %08X (%s)%c", id,
+                (NP_BUILD_DIRTY || !NP_BUILD_TREE[0]) ? "this exe only: local changes or no git"
+                                                      : "source tree " NP_BUILD_TREE, 10);
+    }
+    return id;
 }
 
 static void stamp_name(char *out, size_t cap, const char *prefix, const char *suffix, const char *ext)

@@ -8,6 +8,20 @@
 #define RP_VERSION 1u
 #define PAD_WIRE   18u
 
+uint32_t np_build_id(const char *commit, int dirty, uint32_t link_stamp)
+{
+    uint32_t len = 0, id;
+    if (!commit || dirty) return link_stamp;
+    while (commit[len]) {
+        char c = commit[len];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return link_stamp;
+        len++;
+    }
+    if (len < 7) return link_stamp;
+    id = np_fnv32(NP_FNV32_INIT, commit, len);
+    return id ? id : 1u;
+}
+
 uint32_t np_fnv32(uint32_t h, const void *p, uint32_t len)
 {
     const uint8_t *b = (const uint8_t *)p;

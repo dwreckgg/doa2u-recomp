@@ -122,3 +122,5 @@ doa2u_host_test(netplay_handoff_test ${ONLINE_DIR}/netplay_handoff.c ${CMAKE_SOU
 doa2u_host_test(netplay_session_test ${ONLINE_DIR}/netplay_session.c ${ONLINE_DIR}/netplay_format.c
                 ${ONLINE_DIR}/online_settings.c ${CMAKE_SOURCE_DIR}/tests/netplay_session_test.c
                 ${CMAKE_SOURCE_DIR}/tests/fake_game.c ${CMAKE_SOURCE_DIR}/tests/netplay_stubs.c)
+target_include_directories(netplay_session_test PRIVATE ${CMAKE_BINARY_DIR}/src/online/generated)   # np_build_id.h
+add_dependencies(netplay_session_test np_build_id)
