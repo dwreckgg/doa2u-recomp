@@ -45,6 +45,12 @@ void video_set_aspect(int aspect);
 int  video_get_scale(void);
 void video_set_scale(int scale);
 
+/* Variable refresh (G-Sync / FreeSync): frames are presented the moment the
+ * 60 Hz timer releases them, with tearing allowed, so a VRR display refreshes
+ * exactly every 1/60 s. Off by default: on a fixed-refresh display it tears. */
+int  video_get_vrr(void);
+void video_set_vrr(int on);
+
 /* Host size of the guest render target for an aspect at the current internal
  * resolution: 480 lines at 1x, 960 at 2x, 1440 at 3x. */
 void video_guest_target_size(int aspect, unsigned *w, unsigned *h);

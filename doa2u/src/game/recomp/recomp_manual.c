@@ -592,19 +592,9 @@ void sub_0034AF80(void)
     uint32_t sv_esi = esi, sv_edi = edi, sv_ebx = ebx;
     uint32_t dev;
     sub_0034AF80_gen();
-    {   /* 60 Hz pacing: wait for the next 1/60 s boundary; resync if a frame or more behind. */
-        static LARGE_INTEGER s_freq, s_next;
-        LARGE_INTEGER now;
-        if (!s_freq.QuadPart) { QueryPerformanceFrequency(&s_freq); timeBeginPeriod(1); }
-        QueryPerformanceCounter(&now);
-        if (!s_next.QuadPart || now.QuadPart - s_next.QuadPart > s_freq.QuadPart / 60)
-            s_next = now;
-        while (now.QuadPart < s_next.QuadPart) {
-            LONGLONG left_ms = (s_next.QuadPart - now.QuadPart) * 1000 / s_freq.QuadPart;
-            if (left_ms > 2) Sleep((DWORD)(left_ms - 1));
-            QueryPerformanceCounter(&now);
-        }
-        s_next.QuadPart += s_freq.QuadPart / 60;
+    {   /* 60 Hz pacing (d3d/frame_pacer.h): the display or a 60 Hz timer is the clock. */
+        extern void d3d8_frame_pace(void);
+        d3d8_frame_pace();
     }
     {
         uint32_t ret_eax = eax, ret_esp = esp;

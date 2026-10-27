@@ -8,6 +8,7 @@ add_library(d3d8_compat STATIC
     d3d8_states.c
     d3d8_combiners.c
     d3d8_vsh.c
+    frame_pacer.c
 )
 
 target_include_directories(d3d8_compat PUBLIC
@@ -21,6 +22,7 @@ target_link_libraries(d3d8_compat
     dxgi
     dxguid
     d3dcompiler
+    winmm
 )
 
 if(MSVC)

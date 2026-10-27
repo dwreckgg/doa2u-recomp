@@ -249,6 +249,7 @@ void DrawVideoSection()
         video_set_window_mode(VIDEO_BORDERLESS);
         video_set_aspect(VIDEO_ASPECT_16_9);
         video_set_scale(3);
+        video_set_vrr(0);
         SetStatus("Video settings reset to defaults");
         break;
     case 2:
@@ -272,6 +273,14 @@ void DrawVideoSection()
     if (ImGui::Combo("Internal resolution", &sc, kScale, IM_ARRAYSIZE(kScale)) &&
         sc + 1 != video_get_scale())
         video_set_scale(sc + 1);
+
+    bool vrr = video_get_vrr() != 0;
+    if (ImGui::Checkbox("Variable refresh (G-Sync / FreeSync)", &vrr))
+        video_set_vrr(vrr ? 1 : 0);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("For G-Sync / FreeSync displays: frames are shown the moment they are ready,\n"
+                          "exactly 60 a second. Leave off on a fixed-refresh display (it would tear).\n"
+                          "On 60/120/240 Hz displays without it, frames are synced to the refresh.");
 }
 
 /* ── Check for Updates ────────────────────────────────────────────────────

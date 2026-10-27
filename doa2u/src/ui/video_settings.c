@@ -15,6 +15,10 @@ extern ptrdiff_t g_xbox_mem_offset;
 static int g_window_mode = VIDEO_BORDERLESS;
 static int g_aspect      = VIDEO_ASPECT_16_9;
 static int g_scale       = 3;
+static int g_vrr         = 0;
+
+int video_get_vrr(void)         { return g_vrr; }
+void video_set_vrr(int on)      { g_vrr = on != 0; }
 
 int video_get_window_mode(void) { return g_window_mode; }
 int video_get_aspect(void)      { return g_aspect; }
@@ -44,6 +48,7 @@ int video_settings_load(void)
     g_window_mode = (wm == VIDEO_WINDOWED) ? VIDEO_WINDOWED : VIDEO_BORDERLESS;
     g_aspect      = (ar == VIDEO_ASPECT_4_3) ? VIDEO_ASPECT_4_3 : VIDEO_ASPECT_16_9;
     g_scale       = (sc >= 1 && sc <= 3) ? sc : 3;
+    g_vrr         = GetPrivateProfileIntA("Video", "VariableRefresh", 0, p) != 0;
     return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
 }
 
@@ -52,13 +57,15 @@ int video_settings_save(void)
     const char *p = doa2u_settings_ini_path();
     /* WindowMode: 0 = windowed, 1 = borderless fullscreen.
      * Widescreen: 0 = 4:3, 1 = 16:9.
-     * InternalResolution: 1 = 480 lines, 2 = 960, 3 = 1440. */
+     * InternalResolution: 1 = 480 lines, 2 = 960, 3 = 1440.
+     * VariableRefresh: 1 = present for G-Sync/FreeSync (see video_settings.h). */
     return WritePrivateProfileStringA("Video", "WindowMode",
                                       g_window_mode ? "1" : "0", p) &&
            WritePrivateProfileStringA("Video", "Widescreen",
                                       g_aspect ? "1" : "0", p) &&
            WritePrivateProfileStringA("Video", "InternalResolution",
-                                      g_scale == 3 ? "3" : g_scale == 2 ? "2" : "1", p);
+                                      g_scale == 3 ? "3" : g_scale == 2 ? "2" : "1", p) &&
+           WritePrivateProfileStringA("Video", "VariableRefresh", g_vrr ? "1" : "0", p);
 }
 
 /* 480 lines at 1x. The translator maps every guest vertex onto whatever size

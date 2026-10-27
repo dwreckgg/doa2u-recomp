@@ -24,6 +24,123 @@ static UINT          g_nv2aff_idx_off;
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <dxgi1_5.h>
+#include <timeapi.h>
+HWND d3d8_GetHWND(void);
+#include "frame_pacer.h"
+#include "../ui/video_settings.h"
+
+/* Presentation (frame_pacer.h): flip-model swap chain with a frame-latency
+ * waitable object, tearing allowed where the system supports it (for variable
+ * refresh). Falls back to the legacy blt-model chain when DXGI refuses. */
+static UINT   g_swap_flags;         /* the chain's flags; ResizeBuffers must pass the same */
+static int    g_tearing_ok;         /* DXGI_FEATURE_PRESENT_ALLOW_TEARING */
+static HANDLE g_latency_wait;       /* IDXGISwapChain2 frame-latency waitable, or NULL */
+static int    g_last_occluded;      /* the last Present reported the window occluded */
+static int    g_refresh_hz;         /* refresh of the window's monitor, 0 = unknown */
+
+static int query_tearing_support(void)
+{
+    IDXGIFactory1 *f1 = NULL;
+    IDXGIFactory5 *f5 = NULL;
+    BOOL allow = FALSE;
+    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&f1))) return 0;
+    if (SUCCEEDED(IDXGIFactory1_QueryInterface(f1, &IID_IDXGIFactory5, (void **)&f5))) {
+        if (FAILED(IDXGIFactory5_CheckFeatureSupport(f5, DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow, sizeof(allow))))
+            allow = FALSE;
+        IDXGIFactory5_Release(f5);
+    }
+    IDXGIFactory1_Release(f1);
+    return allow ? 1 : 0;
+}
+
+static int window_refresh_hz(HWND hwnd)
+{
+    MONITORINFOEXW mi;
+    DEVMODEW dm;
+    HMONITOR mon = hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) : NULL;
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!mon || !GetMonitorInfoW(mon, (MONITORINFO *)&mi)) return 0;
+    memset(&dm, 0, sizeof(dm));
+    dm.dmSize = sizeof(dm);
+    if (!EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)) return 0;
+    return dm.dmDisplayFrequency > 1 ? (int)dm.dmDisplayFrequency : 0;   /* 0 and 1 mean "hardware default" */
+}
+
+static PacePlan current_plan(void)
+{
+    return pace_plan(g_refresh_hz, video_get_vrr(), g_tearing_ok);
+}
+
+/* Wait until a performance-counter time: a high-resolution waitable timer for
+ * the bulk, then a short spin for the last half millisecond. */
+static void wait_until(LONGLONG target, LONGLONG freq)
+{
+    static HANDLE timer;
+    static int timer_tried;
+    LARGE_INTEGER now;
+    if (!timer_tried) {
+        timer_tried = 1;
+        timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+        if (!timer) timeBeginPeriod(1);
+    }
+    for (;;) {
+        LONGLONG left;
+        QueryPerformanceCounter(&now);
+        left = target - now.QuadPart;
+        if (left <= 0) return;
+        if (left > freq / 2000) {                      /* more than 0.5 ms: sleep most of it */
+            LONGLONG sleep_100ns = (left - freq / 2000) * 10000000 / freq;
+            if (timer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -sleep_100ns;
+                if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
+                    WaitForSingleObject(timer, INFINITE);
+            } else if (sleep_100ns >= 10000) {
+                Sleep((DWORD)(sleep_100ns / 10000));
+            }
+        } else {
+            YieldProcessor();
+        }
+    }
+}
+
+/* Called once per guest Swap, before the frame is presented: holds the game
+ * to 60 frames a second. Under a vsync plan the display is the clock (wait
+ * until the chain can take a frame); the timer still runs as a cap so an
+ * occluded or minimised window, where Present stops blocking, cannot race. */
+void d3d8_frame_pace(void)
+{
+    static LARGE_INTEGER freq;
+    static LONGLONG next;
+    static unsigned frames;
+    LARGE_INTEGER now;
+    PacePlan plan;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    if ((frames++ % 60u) == 0u) g_refresh_hz = window_refresh_hz(d3d8_GetHWND());
+    plan = current_plan();
+    if (plan.vsync_clock && g_latency_wait && !g_last_occluded)
+        WaitForSingleObjectEx(g_latency_wait, 100, TRUE);
+    QueryPerformanceCounter(&now);
+    {
+        const LONGLONG wait = pace_timer_step(now.QuadPart, &next, freq.QuadPart, plan.cap_hz);
+        if (wait > 0) wait_until(now.QuadPart + wait, freq.QuadPart);
+    }
+}
+
+/* Present the composed frame under the current plan. */
+static HRESULT paced_present(IDXGISwapChain *chain)
+{
+    const PacePlan plan = current_plan();
+    UINT flags = 0;
+    HRESULT hr;
+    if (plan.tearing && (g_swap_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) && plan.interval == 0)
+        flags |= DXGI_PRESENT_ALLOW_TEARING;
+    hr = IDXGISwapChain_Present(chain, (UINT)plan.interval, flags);
+    g_last_occluded = (hr == DXGI_STATUS_OCCLUDED);
+    return hr;
+}
 
 /* ================================================================
  * Internal device state
@@ -370,8 +487,9 @@ static HRESULT d3d11_create_device_and_swap_chain(
             sh = (UINT)(rc.bottom - rc.top);
         }
     }
+    g_tearing_ok = query_tearing_support();
     memset(&scd, 0, sizeof(scd));
-    scd.BufferCount = pp->BackBufferCount ? pp->BackBufferCount : 1;
+    scd.BufferCount = 2;                        /* flip model: two buffers, one queued frame */
     scd.BufferDesc.Width = sw ? sw : (pp->BackBufferWidth ? pp->BackBufferWidth : 640);
     scd.BufferDesc.Height = sh ? sh : (pp->BackBufferHeight ? pp->BackBufferHeight : 480);
     scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -382,7 +500,9 @@ static HRESULT d3d11_create_device_and_swap_chain(
     scd.SampleDesc.Count = 1;
     scd.SampleDesc.Quality = 0;
     scd.Windowed = pp->Windowed;
-    scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    scd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    scd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT |
+                (g_tearing_ok ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
 
     hr = D3D11CreateDeviceAndSwapChain(
         NULL,
@@ -397,10 +517,32 @@ static HRESULT d3d11_create_device_and_swap_chain(
         &feature_level,
         &state->d3d11_context
     );
+    if (FAILED(hr)) {
+        /* Older systems: the legacy blt-model chain, paced by the timer alone. */
+        g_tearing_ok = 0;
+        scd.BufferCount = pp->BackBufferCount ? pp->BackBufferCount : 1;
+        scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        scd.Flags = 0;
+        hr = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, create_flags, NULL, 0,
+                                           D3D11_SDK_VERSION, &scd, &state->swap_chain,
+                                           &state->d3d11_device, &feature_level, &state->d3d11_context);
+    }
 
     if (FAILED(hr)) {
         return hr;
     }
+    g_swap_flags = scd.Flags;
+    if (g_swap_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) {
+        IDXGISwapChain2 *sc2 = NULL;
+        if (SUCCEEDED(IDXGISwapChain_QueryInterface(state->swap_chain, &IID_IDXGISwapChain2, (void **)&sc2))) {
+            IDXGISwapChain2_SetMaximumFrameLatency(sc2, 1);
+            g_latency_wait = IDXGISwapChain2_GetFrameLatencyWaitableObject(sc2);
+            IDXGISwapChain2_Release(sc2);
+        }
+    }
+    fprintf(stderr, "[D3D] swap chain: %s, tearing %s, latency object %s\n",
+            scd.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ? "flip" : "legacy blt",
+            g_tearing_ok ? "allowed" : "unsupported", g_latency_wait ? "yes" : "no");
 
     state->hwnd = pp->hDeviceWindow;
     state->swap_w = scd.BufferDesc.Width;
@@ -592,6 +734,7 @@ static ULONG __stdcall dev_Release(IDirect3DDevice8 *self)
         D3D8DeviceState *s = &g_device_state;
         d3d11_release_guest_target(s);
         if (s->swap_rtv) { ID3D11RenderTargetView_Release(s->swap_rtv); s->swap_rtv = NULL; }
+        if (g_latency_wait) { CloseHandle(g_latency_wait); g_latency_wait = NULL; }
         if (s->swap_chain) { IDXGISwapChain_Release(s->swap_chain); s->swap_chain = NULL; }
         if (s->d3d11_context) { ID3D11DeviceContext_Release(s->d3d11_context); s->d3d11_context = NULL; }
         if (s->d3d11_device) { ID3D11Device_Release(s->d3d11_device); s->d3d11_device = NULL; }
@@ -727,7 +870,7 @@ static void swap_resize_if_needed(void)
     if (!w || !h) return;                       /* minimised */
     if (w == s->swap_w && h == s->swap_h && s->swap_rtv) return;
     if (s->swap_rtv) { ID3D11RenderTargetView_Release(s->swap_rtv); s->swap_rtv = NULL; }
-    hr = IDXGISwapChain_ResizeBuffers(s->swap_chain, 0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+    hr = IDXGISwapChain_ResizeBuffers(s->swap_chain, 0, w, h, DXGI_FORMAT_UNKNOWN, g_swap_flags);
     if (FAILED(hr)) {
     } else {
         s->swap_w = w;
@@ -881,7 +1024,7 @@ static HRESULT d3d8_compose_and_present(void)
     }
 
     perf_begin(PERF_PRESENT);
-    hr = IDXGISwapChain_Present(s->swap_chain, 0, 0);
+    hr = paced_present(s->swap_chain);
     perf_end(PERF_PRESENT);
     d3d8_apply_target_size_change();
     perf_end(PERF_COMPOSE);

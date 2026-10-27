@@ -30,3 +30,6 @@ add_subdirectory(src/ui)       # Overlay menu (Esc key)
 
 # Recompiled game executable
 add_subdirectory(src/game)
+
+# Host tests for pure modules
+add_subdirectory(tests)
