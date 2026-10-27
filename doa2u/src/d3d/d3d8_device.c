@@ -1074,7 +1074,16 @@ static HRESULT d3d8_compose_and_present(void)
         ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ID3D11DeviceContext_VSSetShader(ctx, g_blit_vs, NULL, 0);
         ID3D11DeviceContext_PSSetShader(ctx, g_blit_ps, NULL, 0);
-        ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &s->default_srv);
+        {   /* SMAA on the resolved frame (d3d8_smaa.c), which keeps the blit's state */
+            extern ID3D11ShaderResourceView *d3d8_smaa_apply(ID3D11Device *, ID3D11DeviceContext *,
+                                                             ID3D11ShaderResourceView *, UINT, UINT);
+            ID3D11ShaderResourceView *show = s->default_srv;
+            if (video_get_smaa()) {
+                ID3D11ShaderResourceView *r = d3d8_smaa_apply(s->d3d11_device, ctx, s->default_srv, s->width, s->height);
+                if (r) show = r;
+            }
+            ID3D11DeviceContext_PSSetShaderResources(ctx, 0, 1, &show);
+        }
         ID3D11DeviceContext_PSSetSamplers(ctx, 0, 1, &g_blit_smp);
         ID3D11DeviceContext_Draw(ctx, 3, 0);
         {   /* unbind the guest texture before it is a render target again */

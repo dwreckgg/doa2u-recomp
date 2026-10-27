@@ -56,6 +56,11 @@ void video_set_vrr(int on);
 int  video_get_msaa(void);
 void video_set_msaa(int samples);
 
+/* SMAA 1x (third_party/smaa) on the frame before it is shown; works with or
+ * without MSAA. Applied immediately. */
+int  video_get_smaa(void);
+void video_set_smaa(int on);
+
 /* Host size of the guest render target for an aspect at the current internal
  * resolution: 480 lines at 1x, 960 at 2x, 1440 at 3x. */
 void video_guest_target_size(int aspect, unsigned *w, unsigned *h);

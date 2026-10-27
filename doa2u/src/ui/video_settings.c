@@ -17,6 +17,10 @@ static int g_aspect      = VIDEO_ASPECT_16_9;
 static int g_scale       = 3;
 static int g_vrr         = 0;
 static int g_msaa        = 1;
+static int g_smaa        = 0;
+
+int video_get_smaa(void)        { return g_smaa; }
+void video_set_smaa(int on)     { g_smaa = on != 0; }
 
 int video_get_msaa(void)        { return g_msaa; }
 void video_set_msaa(int samples)
@@ -57,6 +61,7 @@ int video_settings_load(void)
     g_scale       = (sc >= 1 && sc <= 3) ? sc : 3;
     g_vrr         = GetPrivateProfileIntA("Video", "VariableRefresh", 0, p) != 0;
     video_set_msaa((int)GetPrivateProfileIntA("Video", "MSAA", 1, p));
+    g_smaa        = GetPrivateProfileIntA("Video", "SMAA", 0, p) != 0;
     return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
 }
 
@@ -67,7 +72,7 @@ int video_settings_save(void)
      * Widescreen: 0 = 4:3, 1 = 16:9.
      * InternalResolution: 1 = 480 lines, 2 = 960, 3 = 1440.
      * VariableRefresh: 1 = present for G-Sync/FreeSync (see video_settings.h).
-     * MSAA: 1 = off, 2/4/8 samples. */
+     * MSAA: 1 = off, 2/4/8 samples. SMAA: 1 = on. */
     return WritePrivateProfileStringA("Video", "WindowMode",
                                       g_window_mode ? "1" : "0", p) &&
            WritePrivateProfileStringA("Video", "Widescreen",
@@ -75,7 +80,8 @@ int video_settings_save(void)
            WritePrivateProfileStringA("Video", "InternalResolution",
                                       g_scale == 3 ? "3" : g_scale == 2 ? "2" : "1", p) &&
            WritePrivateProfileStringA("Video", "VariableRefresh", g_vrr ? "1" : "0", p) &&
-           WritePrivateProfileStringA("Video", "MSAA", g_msaa == 8 ? "8" : g_msaa == 4 ? "4" : g_msaa == 2 ? "2" : "1", p);
+           WritePrivateProfileStringA("Video", "MSAA", g_msaa == 8 ? "8" : g_msaa == 4 ? "4" : g_msaa == 2 ? "2" : "1", p) &&
+           WritePrivateProfileStringA("Video", "SMAA", g_smaa ? "1" : "0", p);
 }
 
 /* 480 lines at 1x. The translator maps every guest vertex onto whatever size

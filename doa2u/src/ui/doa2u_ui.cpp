@@ -251,6 +251,7 @@ void DrawVideoSection()
         video_set_scale(3);
         video_set_vrr(0);
         video_set_msaa(1);
+        video_set_smaa(0);
         SetStatus("Video settings reset to defaults");
         break;
     case 2:
@@ -279,6 +280,9 @@ void DrawVideoSection()
     int aa = video_get_msaa() >= 8 ? 3 : video_get_msaa() >= 4 ? 2 : video_get_msaa() >= 2 ? 1 : 0;
     if (ImGui::Combo("Anti-aliasing", &aa, kMsaa, IM_ARRAYSIZE(kMsaa)))
         video_set_msaa(aa == 3 ? 8 : aa == 2 ? 4 : aa == 1 ? 2 : 1);
+    bool smaa = video_get_smaa() != 0;
+    if (ImGui::Checkbox("SMAA (smooths edges MSAA misses)", &smaa))
+        video_set_smaa(smaa ? 1 : 0);
 
     bool vrr = video_get_vrr() != 0;
     if (ImGui::Checkbox("Variable refresh (G-Sync / FreeSync)", &vrr))
