@@ -264,6 +264,55 @@ IDirect3DDevice8    *d3d8_GetDevice(void) { return &g_device; }
 ID3D11Device        *d3d8_GetD3D11Device(void) { return g_device_state.d3d11_device; }
 ID3D11DeviceContext *d3d8_GetD3D11Context(void) { return g_device_state.d3d11_context; }
 IDXGISwapChain      *d3d8_GetSwapChain(void) { return g_device_state.swap_chain; }
+
+/* Save the back buffer (R8G8B8A8, DISCARD swap chain: buffer 0 is the frame
+ * being presented) as a 24-bit BMP. Called right before Present, so no window
+ * capture and no focus change is needed (the automation's screenshot hook). */
+int d3d8_SaveBackbufferBMP(const char *path)
+{
+    ID3D11Texture2D *bb = NULL, *st = NULL;
+    D3D11_TEXTURE2D_DESC td;
+    D3D11_MAPPED_SUBRESOURCE map;
+    ID3D11DeviceContext *ctx = g_device_state.d3d11_context;
+    ID3D11Device *dev = g_device_state.d3d11_device;
+    FILE *f;
+    int ok = 0;
+    unsigned y;
+    if (!g_device_state.swap_chain || !ctx || !dev) return 0;
+    if (FAILED(IDXGISwapChain_GetBuffer(g_device_state.swap_chain, 0, &IID_ID3D11Texture2D, (void **)&bb))) return 0;
+    ID3D11Texture2D_GetDesc(bb, &td);
+    td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ; td.MiscFlags = 0;
+    td.MipLevels = 1; td.ArraySize = 1; td.SampleDesc.Count = 1; td.SampleDesc.Quality = 0;
+    if (FAILED(ID3D11Device_CreateTexture2D(dev, &td, NULL, &st))) { ID3D11Texture2D_Release(bb); return 0; }
+    ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource *)st, (ID3D11Resource *)bb);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)st, 0, D3D11_MAP_READ, 0, &map)) && (f = fopen(path, "wb")) != NULL) {
+        unsigned w = td.Width, h = td.Height, row = (w * 3 + 3) & ~3u, size = 54 + row * h;
+        unsigned char hdr[54] = { 'B', 'M' };
+        unsigned char *line = (unsigned char *)malloc(row);
+        hdr[2] = (unsigned char)size; hdr[3] = (unsigned char)(size >> 8); hdr[4] = (unsigned char)(size >> 16); hdr[5] = (unsigned char)(size >> 24);
+        hdr[10] = 54; hdr[14] = 40;
+        hdr[18] = (unsigned char)w; hdr[19] = (unsigned char)(w >> 8); hdr[20] = (unsigned char)(w >> 16); hdr[21] = (unsigned char)(w >> 24);
+        hdr[22] = (unsigned char)h; hdr[23] = (unsigned char)(h >> 8); hdr[24] = (unsigned char)(h >> 16); hdr[25] = (unsigned char)(h >> 24);
+        hdr[26] = 1; hdr[28] = 24;
+        fwrite(hdr, 1, 54, f);
+        if (line) {
+            memset(line, 0, row);
+            for (y = 0; y < h; y++) {                       /* BMP rows run bottom-up */
+                const unsigned char *src = (const unsigned char *)map.pData + (size_t)(h - 1 - y) * map.RowPitch;
+                unsigned x;
+                for (x = 0; x < w; x++) { line[3 * x] = src[4 * x + 2]; line[3 * x + 1] = src[4 * x + 1]; line[3 * x + 2] = src[4 * x]; }
+                fwrite(line, 1, row, f);
+            }
+            free(line);
+            ok = 1;
+        }
+        fclose(f);
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)st, 0);
+    }
+    ID3D11Texture2D_Release(st);
+    ID3D11Texture2D_Release(bb);
+    return ok;
+}
 ID3D11RenderTargetView *d3d8_GetDefaultRTV(void) { return g_device_state.default_rtv; }
 ID3D11Texture2D     *d3d8_GetGuestTexture(void) { return g_device_state.default_tex; }
 /* The window-sized swap chain target, for the overlay drawn after the blit. */

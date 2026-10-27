@@ -23,6 +23,13 @@ extern "C" {
 void        netplay_diag_frame(void);            /* every pad-builder call, game thread */
 uint32_t    netplay_diag_forced_pads(void);      /* ports 0 and 1 while mirroring */
 void        netplay_diag_request_dump(const char *tag);   /* written at the next pad-builder call */
+/* Dump when the running session reaches `frame` (before that frame's input
+ * tick: the state entering it), once. File form: netplay_dump_at.on holding
+ * "FRAME[,FRAME...] TAG" (up to 8 frames; each dump is tagged TAG_FRAME).
+ * A frame may also be "f+N" / "f-1": N frames after the first fight frame of
+ * the session, or the frame before it (kept as a rolling copy of guest RAM
+ * while such a request is pending, about 10 ms a frame). */
+void        netplay_diag_dump_at(uint32_t frame, const char *tag);
 uint32_t    netplay_diag_builder_calls(void);
 const char *netplay_diag_dump_dir(void);
 const char *netplay_diag_last_dump(void);       /* path of the latest dump, "" before one */

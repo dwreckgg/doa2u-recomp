@@ -214,6 +214,8 @@ static void doa2u_watchdog_start(void)
 
 /* Present the host swap chain once per guest frame (called from the
  * D3DDevice_Swap override in recomp_manual.c) and pump the window. */
+char g_doa2u_shot_path[MAX_PATH];   /* set by netplay_diag.c, consumed before the next Present */
+
 void doa2u_present_frame(void)
 {
     InterlockedIncrement(&g_doa2u_heartbeat);
@@ -233,6 +235,13 @@ void doa2u_present_frame(void)
             if (g_perf_on) perf_frame();
             return;
         }
+    }
+    if (g_doa2u_shot_path[0]) {                     /* automation screenshot (netplay_shot.on): the frame about to be presented */
+        extern int d3d8_SaveBackbufferBMP(const char *path);
+        int ok = d3d8_SaveBackbufferBMP(g_doa2u_shot_path);
+        fprintf(stderr, "[netplay] screenshot %s: %s\n", g_doa2u_shot_path, ok ? "written" : "FAILED");
+        fflush(stderr);
+        g_doa2u_shot_path[0] = 0;
     }
     if (g_d3d_device)
         g_d3d_device->lpVtbl->Present(g_d3d_device, NULL, NULL, NULL, NULL);

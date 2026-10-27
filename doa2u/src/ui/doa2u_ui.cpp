@@ -639,9 +639,14 @@ void DrawOnlineTesting()
      * must reach the session too (measured 2026-10-26: Joiner picked after
      * arming still ran the host path). */
     if (role_changed && netplay_armed()) netplay_set_armed(1, role);
+    if (running) ImGui::EndDisabled();
+    /* The mirror may change inside a session: a one-controller tester turns it
+     * off once the fight starts so Player 2 stands still and the match can
+     * end in a KO (mirrored fights only draw). The forced pads stay. */
     bool mirror = netplay_mirror() != 0;
     if (ImGui::Checkbox("Player 2 mirrors Player 1 (one controller)", &mirror))
         netplay_set_mirror(mirror ? 1 : 0);
+    if (running) ImGui::BeginDisabled();
     bool armed = netplay_armed() != 0;
     if (ImGui::Checkbox("Arm local session", &armed))
         netplay_set_armed(armed ? 1 : 0, role);
