@@ -19,6 +19,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "apu_resample.h"
 #include "apu_state.h"
 #include "fpconv.h"
 
@@ -1006,27 +1007,29 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
 }
 
 /* ============================================================
- * Voice resampling (simplified - no libsamplerate)
- *
- * Since libsamplerate is stubbed, we do a simple nearest-neighbor
- * resample. This gives us functional audio at the cost of quality.
+ * Voice resampling: 8-point Lagrange interpolation (apu_resample.c),
+ * as the MCPX voice processor does.
  * ============================================================ */
 
 static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
                           int requested_num, float rate)
 {
     /* rate = output/input ratio (1 / 2^(pitch/4096), as in xemu). The voice
-     * data is fetched at its own sample rate and linearly interpolated onto
-     * the 48 kHz frame grid, so a 44.1 kHz buffer plays at 44.1 kHz and its
-     * play cursor advances at the rate the guest expects. */
+     * data is fetched at its own sample rate and interpolated onto the
+     * 48 kHz frame grid (8-point Lagrange over the last 8 input samples), so
+     * a 44.1 kHz buffer plays at 44.1 kHz and its play cursor advances at
+     * the rate the guest expects. */
     MCPXAPUVoiceFilter *f = &d->vp.filters[v];
     double step = (rate > 0.0f) ? 1.0 / (double)rate : 1.0;
     if (step > 16.0) step = 16.0;
     if (step < 1.0 / 16.0) step = 1.0 / 16.0;
     if (!f->rs_init || voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                       NV_PAVS_VOICE_PAR_STATE_NEW_VOICE)) {
-        f->rs_init = 1; f->rs_in_n = f->rs_in_i = 0; f->rs_frac = 2.0;
-        f->rs_prev[0] = f->rs_prev[1] = f->rs_cur[0] = f->rs_cur[1] = 0.0f;
+        /* Five samples in before the first output, so it is the voice's
+         * first sample (node 3) and nodes 0-2 are silence. */
+        f->rs_init = 1; f->rs_in_n = f->rs_in_i = 0; f->rs_frac = 5.0;
+        memset(f->rs_hist, 0, sizeof f->rs_hist);
+        apu_lagrange8_init();
     }
     int out = 0;
     while (out < requested_num) {
@@ -1038,14 +1041,15 @@ static int voice_resample(MCPXAPUState *d, uint16_t v, float samples[][2],
                 if (count <= 0) return out > 0 ? out : -1;
                 f->rs_in_n = count; f->rs_in_i = 0;
             }
-            f->rs_prev[0] = f->rs_cur[0]; f->rs_prev[1] = f->rs_cur[1];
-            f->rs_cur[0] = f->rs_in[f->rs_in_i][0]; f->rs_cur[1] = f->rs_in[f->rs_in_i][1];
+            memmove(f->rs_hist[0], f->rs_hist[1], sizeof(f->rs_hist[0]) * 7);
+            f->rs_hist[7][0] = f->rs_in[f->rs_in_i][0]; f->rs_hist[7][1] = f->rs_in[f->rs_in_i][1];
             f->rs_in_i++;
             f->rs_frac -= 1.0;
         }
-        {   float t = (float)f->rs_frac;
-            samples[out][0] = f->rs_prev[0] + (f->rs_cur[0] - f->rs_prev[0]) * t;
-            samples[out][1] = f->rs_prev[1] + (f->rs_cur[1] - f->rs_prev[1]) * t; }
+        {   float l[8], r[8];
+            for (int k = 0; k < 8; k++) { l[k] = f->rs_hist[k][0]; r[k] = f->rs_hist[k][1]; }
+            samples[out][0] = apu_lagrange8(l, f->rs_frac);
+            samples[out][1] = apu_lagrange8(r, f->rs_frac); }
         out++;
         f->rs_frac += step;
     }

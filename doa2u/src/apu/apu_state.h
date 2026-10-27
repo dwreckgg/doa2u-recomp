@@ -378,7 +378,7 @@ typedef struct MCPXAPUVoiceFilter {
     float rs_in[NUM_SAMPLES_PER_FRAME][2];
     int rs_in_n, rs_in_i, rs_init;
     double rs_frac;
-    float rs_prev[2], rs_cur[2];
+    float rs_hist[8][2];       /* last 8 input samples; output lies between [3] and [4] */
     sv_filter svf[2];
     HrtfFilter hrtf;
 } MCPXAPUVoiceFilter;
