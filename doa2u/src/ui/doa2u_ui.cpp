@@ -25,6 +25,7 @@ extern "C" {
 #include "../online/netplay_session.h"
 #include "../online/netplay_diag.h"
 #include "../online/online_settings.h"
+#include "../online/netplay.h"
 ID3D11RenderTargetView *d3d8_GetPresentRTV(void);
 UINT                    d3d8_GetPresentWidth(void);
 UINT                    d3d8_GetPresentHeight(void);
@@ -778,8 +779,130 @@ void DrawOnlineTesting()
     if (netplay_diag_dirty_report()[0]) ImGui::TextDisabled("%s", netplay_diag_dirty_report());
 }
 
+/* Online play has something to show over the game (a wait, a disconnect, a
+ * desync) even when the menu is closed. */
+bool NetplayBannerPending()
+{
+    char b[8];
+    return netplay_banner(b, sizeof(b)) != 0;
+}
+
+void DrawNetplayBanner()
+{
+    char text[200];
+    if (!netplay_banner(text, sizeof(text))) return;
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    ImVec2 size = ImGui::CalcTextSize(text);
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f, vp->WorkPos.y + 24.0f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(size.x + 32.0f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.75f);
+    if (ImGui::Begin("##netplay_banner", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted(text);
+    }
+    ImGui::End();
+}
+
+/* Host, join, battle type, input delay (doa3_ui.cpp DrawOnlineSection). */
+void DrawOnlineConnection()
+{
+    static char join[64];
+    npl_status nl;
+    netplay_get(&nl);
+    bool online = nl.state != NPL_OFFLINE;
+
+    /* status, with Save at the right end of the same line */
+    {
+        const ImGuiStyle &style = ImGui::GetStyle();
+        float w = ImGui::CalcTextSize("Save").x + style.FramePadding.x * 2.0f;
+        float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushTextWrapPos(right - w - style.ItemSpacing.x);
+        if (nl.state == NPL_INMATCH && nl.stalling)
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s", nl.status);
+        else if (nl.desynced)
+            ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%s", nl.status);
+        else
+            ImGui::TextWrapped("%s", nl.status);
+        ImGui::PopTextWrapPos();
+        ImGui::SameLine(right - w);
+        if (ImGui::Button("Save")) SetSaveStatus(netplay_settings_save(), doa2u_settings_ini_path());
+    }
+    if (nl.event[0]) ImGui::TextWrapped("%s", nl.event);
+
+    if (nl.is_host && online) {
+        /* the host's code: the one thing the other player needs */
+        ImGui::SeparatorText("Your code");
+        if (nl.my_code[0]) {
+            ImGui::Text("%s", nl.my_code);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(nl.my_code);
+            if (nl.my_code_note[0]) ImGui::TextDisabled("%s", nl.my_code_note);
+        }
+        /* a router that drops packets from strangers: reach out to the joiner */
+        if (nl.state == NPL_HOSTING) {
+            ImGui::SetNextItemWidth(220);
+            bool enter = ImGui::InputTextWithHint("##joinercode", "the other player's code", join, sizeof join,
+                                                  ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine();
+            if (ImGui::Button("Reach out") || enter) netplay_use_code(join);
+        }
+    } else if (!online) {
+        ImGui::SeparatorText("Join");
+        ImGui::SetNextItemWidth(220);
+        bool enter = ImGui::InputTextWithHint("##code", "code or a.b.c.d:port", join, sizeof join,
+                                              ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine();
+        if (ImGui::Button("Join") || enter) netplay_use_code(join);
+        ImGui::SameLine();
+        if (ImGui::Button("Host")) netplay_host(netplay_port());
+        if (netplay_last_join()[0]) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Last code")) strncpy_s(join, sizeof join, netplay_last_join(), _TRUNCATE);
+        }
+    }
+    if (online && ImGui::Button("Disconnect")) netplay_disconnect();
+    if (nl.hint[0]) ImGui::TextWrapped("%s", nl.hint);
+
+    ImGui::SeparatorText("Battle type");
+    {
+        int battle = nl.battle;
+        bool chooser = !online || nl.is_host;
+        bool in_match = nl.state == NPL_INMATCH;
+        if (!chooser || in_match) ImGui::BeginDisabled();
+        if (ImGui::RadioButton("Single", battle == 0)) netplay_set_battle(0);
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Tag", battle == 1)) netplay_set_battle(1);
+        if (!chooser || in_match) ImGui::EndDisabled();
+        if (!chooser) { ImGui::SameLine(); ImGui::TextDisabled("(the host picks)"); }
+    }
+
+    ImGui::SeparatorText("Input delay");
+    {
+        int automatic = netplay_delay_auto();
+        int manual = netplay_delay_manual();
+        bool in_match = nl.state == NPL_INMATCH;
+        if (in_match) ImGui::BeginDisabled();
+        if (ImGui::RadioButton("Auto (from the ping)", automatic != 0)) netplay_set_delay(1, manual);
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Manual", automatic == 0)) netplay_set_delay(0, manual);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::SliderInt("frames", &manual, 1, 8)) netplay_set_delay(automatic, manual);
+        if (in_match) ImGui::EndDisabled();
+    }
+    if (nl.state == NPL_INMATCH)
+        ImGui::Text("%s Battle online, %.1f frames ahead of the other side",
+                    nl.match_tag ? "Tag" : "Single", nl.frames_ahead);
+    ImGui::Separator();
+}
+
 void DrawOnlineSection()
 {
+    DrawOnlineConnection();
     DrawOnlineTesting();
 }
 
@@ -958,7 +1081,7 @@ extern "C" void doa2u_ui_render(void)
 {
     /* Nothing to do on a normal frame unless the menu is open or the FPS
      * counter is on. */
-    if (!g_visible && !doa2u_fps_enabled()) return;
+    if (!g_visible && !doa2u_fps_enabled() && !NetplayBannerPending()) return;
     if (!g_ready && !doa2u_ui_init()) return;
 
     ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
@@ -979,6 +1102,7 @@ extern "C" void doa2u_ui_render(void)
     ImGui::NewFrame();
 
     if (doa2u_fps_enabled()) DrawFpsCounter();
+    DrawNetplayBanner();
     if (g_visible) DrawMenu();
 
     ImGui::Render();
