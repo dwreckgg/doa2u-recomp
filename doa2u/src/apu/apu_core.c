@@ -308,8 +308,9 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
              * (drops and dry queues both clicked). Bounded so a dead device
              * cannot wedge the APU thread. */
             extern int xa2_queued(void);
+            extern int xa2_max_queued(void);
             int spins = 0;
-            while (xa2_queued() >= 6 && spins < 200) { qemu_mutex_unlock(&d->lock); Sleep(1); qemu_mutex_lock(&d->lock); spins++; }
+            while (xa2_queued() >= xa2_max_queued() && spins < 200) { qemu_mutex_unlock(&d->lock); Sleep(1); qemu_mutex_lock(&d->lock); spins++; }
             xa2_submit_samples((const int16_t *)s_stage, buf_size);
             s_fill = 0;
         }
