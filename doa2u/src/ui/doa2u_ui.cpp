@@ -31,7 +31,6 @@ ID3D11RenderTargetView *d3d8_GetDefaultRTV(void);
 HWND                    d3d8_GetHWND(void);
 UINT                    d3d8_GetBackbufferWidth(void);
 UINT                    d3d8_GetBackbufferHeight(void);
-void                    d3d8_RestoreDefaultTarget(void);
 const char             *doa2u_settings_ini_path(void);
 float                   d3d8_GetGameFPS(void);
 }
@@ -799,6 +798,12 @@ extern "C" void doa2u_ui_toggle(void)
     RefreshCursor();
 }
 
+/* The menu runs on the window's thread; the drawing thread only paints a copy of its output. */
+static SRWLOCK g_ui_lock = SRWLOCK_INIT;
+static ImDrawData g_ui_snap;
+static ImVector<ImDrawList *> g_ui_snap_lists;
+static bool g_ui_snap_valid;
+
 extern "C" int doa2u_ui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     /* Escape: cancel a listening row first, otherwise toggle the overlay. It is
@@ -845,18 +850,43 @@ extern "C" int doa2u_ui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 }
 
+/* Window thread, once per frame: run the menu and keep a copy of its draw data. */
+extern "C" void doa2u_ui_build(void)
+{
+    int i;
+    AcquireSRWLockExclusive(&g_ui_lock);
+    for (i = 0; i < g_ui_snap_lists.Size; i++) IM_DELETE(g_ui_snap_lists[i]);
+    g_ui_snap_lists.clear();
+    g_ui_snap_valid = false;
+    if ((g_visible || doa2u_fps_enabled()) && (g_ready || doa2u_ui_init())) {
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+        if (doa2u_fps_enabled()) DrawFpsCounter();
+        if (g_visible) DrawMenu();
+        ImGui::Render();
+        ImDrawData *dd = ImGui::GetDrawData();
+        for (i = 0; i < dd->CmdLists.Size; i++) g_ui_snap_lists.push_back(dd->CmdLists[i]->CloneOutput());
+        g_ui_snap = *dd;
+        g_ui_snap.CmdLists = g_ui_snap_lists;
+        g_ui_snap_valid = true;
+    }
+    ReleaseSRWLockExclusive(&g_ui_lock);
+}
+
 extern "C" void doa2u_ui_render(void)
 {
-    /* Nothing to do on a normal frame unless the menu is open or the FPS
-     * counter is on. */
-    if (!g_visible && !doa2u_fps_enabled()) return;
-    if (!g_ready && !doa2u_ui_init()) return;
+    HWND hwnd = d3d8_GetHWND();
+    if (hwnd && GetWindowThreadProcessId(hwnd, NULL) == GetCurrentThreadId())
+        doa2u_ui_build();   /* not handed to the drawing thread (movies): build here */
+    AcquireSRWLockExclusive(&g_ui_lock);
+    if (!g_ui_snap_valid) { ReleaseSRWLockExclusive(&g_ui_lock); return; }
 
     ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
     /* Drawn after the guest frame has been scaled into the window, so the
      * overlay is at window resolution and lines up with the mouse. */
     ID3D11RenderTargetView *rtv = d3d8_GetPresentRTV();
-    if (!ctx || !rtv) return;
+    if (!ctx || !rtv) { ReleaseSRWLockExclusive(&g_ui_lock); return; }
 
     /* The overlay replaces the output-merger targets and the viewport below.
      * Save the viewport: the guest only re-sets its own when it calls
@@ -864,15 +894,6 @@ extern "C" void doa2u_ui_render(void)
     D3D11_VIEWPORT prev_vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
     UINT prev_nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
     ctx->RSGetViewports(&prev_nvp, prev_vp);
-
-    ImGui_ImplDX11_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
-
-    if (doa2u_fps_enabled()) DrawFpsCounter();
-    if (g_visible) DrawMenu();
-
-    ImGui::Render();
 
     /* The pgraph translator and the movie presenter each bind their own target
      * and viewport; bind the backbuffer explicitly rather than inheriting
@@ -885,10 +906,8 @@ extern "C" void doa2u_ui_render(void)
     ctx->OMSetRenderTargets(1, &rtv, nullptr);
     ctx->RSSetViewports(1, &vp);
 
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    /* Hand the output merger back with the depth buffer attached. The bind
-     * above passes a null depth-stencil view; leaving that bound means every
-     * guest draw afterwards runs with no depth test and no depth writes. */
-    d3d8_RestoreDefaultTarget();
+    ImGui_ImplDX11_RenderDrawData(&g_ui_snap);
+    /* compose restores the target; resetting the offscreen flag here caused the Dragon Hill black screen */
     if (prev_nvp) ctx->RSSetViewports(prev_nvp, prev_vp);
+    ReleaseSRWLockExclusive(&g_ui_lock);
 }

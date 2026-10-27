@@ -74,11 +74,36 @@ long d3d8_DrawNv2aTS(const Nv2aTSVertex *verts, unsigned nverts,
                      const uint16_t *idx, unsigned nidx, int topology,
                      const Nv2aTSConstants *cb);
 
+/* Raw vertex arrays: guest attribute bytes decoded by the input assembler. Elements:
+ * FF = POSITION, NORMAL, COLOR0, TEXCOORD0; TS adds COLOR1 and TEXCOORD0..3. */
+enum {
+    NV2ARAW_F_R32 = 1, NV2ARAW_F_R32G32, NV2ARAW_F_R32G32B32, NV2ARAW_F_R32G32B32A32,
+    NV2ARAW_F_R8, NV2ARAW_F_R8G8, NV2ARAW_F_R8G8B8A8, NV2ARAW_F_B8G8R8A8,
+    NV2ARAW_F_S16, NV2ARAW_F_S16S16, NV2ARAW_F_S16X4
+};
+#define NV2ARAW_MAX_STREAMS 8
+#define NV2ARAW_DEFAULTS    0xFF   /* stream id of the constant defaults: +0 = (0,0,0,0), +16 = (0,0,0,1) */
+typedef struct {
+    const void *src;     /* host pointer to the first byte used */
+    unsigned    size;    /* bytes */
+    unsigned    stride;
+} Nv2aRawStream;
+typedef struct {
+    uint8_t  stream;     /* index into the streams, or NV2ARAW_DEFAULTS */
+    uint8_t  fmt;        /* NV2ARAW_F_* */
+    uint16_t offset;     /* byte offset inside the stream's vertex */
+} Nv2aRawElem;
+
+long d3d8_DrawNv2aRaw(int ts, const Nv2aRawStream *streams, unsigned nstreams, const Nv2aRawElem *elems,
+                      const uint16_t *idx, unsigned nidx, int topology, const void *cb);
+
 /* d3d8_shaders.c: compile once; bind VS + layout + constants for one draw. */
 long d3d8_Nv2aFF_Init(void);
 void d3d8_Nv2aFF_Shutdown(void);
 int  d3d8_Nv2aFF_Bind(const Nv2aFFConstants *cb);
 int  d3d8_Nv2aTS_Bind(const Nv2aTSConstants *cb);
+/* The raw-array input layout for this element set (cached); NULL if it cannot be built. */
+void *d3d8_Nv2aRaw_Layout(int ts, const Nv2aRawElem *elems, unsigned defaults_slot);
 
 /* NV2A texture shader + register combiners as one pixel shader, keyed on the
  * raw pushbuffer registers (stage program, combiner words, alpha test). */

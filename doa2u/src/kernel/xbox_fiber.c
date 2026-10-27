@@ -342,8 +342,10 @@ static DWORD WINAPI fib_slice_timer(LPVOID p)
 void xbox_fiber_timeslice(void)
 {
     extern int doa2u_workers_may_run(void);
+    extern void doa2u_gpu_irq_poll(void);
     static HANDLE s_timer;
     if (!g_active) return;
+    doa2u_gpu_irq_poll();
     if (g_cur != 0) {
         /* A worker at a slice point after its 4 ms hands the CPU back (polling CRI servers kept
          * it forever); XAPI coroutines switch explicitly and are left alone. */

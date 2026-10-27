@@ -22,6 +22,8 @@ extern int  xbox_fiber_is_coroutine(void);
 /* ── Guest addresses (DOA2.xbe) ─────────────────────────────────────── */
 #define D3D_G_PDEVICE        0x003554F8u   /* D3D_g_pDevice */
 #define D3D_FAKE_CHANNEL     0x00355000u   /* XDK's GPU-less FIFO control block (+0x40 PUT, +0x44 GET) */
+static void rt_sync(void);
+extern void nv2a_pgraph_set_reg(uint32_t addr, uint32_t val);
 #define DEV_VBLANK_EVENT_OFS 0x1DBCu       /* D3DDevice__m_VerticalBlankEvent_OFFSET */
 #define DEV_VBLANK_CB_OFS    0x1DB8u       /* D3DDevice__m_VBlankCallback_OFFSET */
 #define DEV_SWAP_CB_OFS      0x1DB4u       /* D3DDevice__m_SwapCallback_OFFSET */
@@ -334,6 +336,7 @@ void sub_0031BBB0(void)
         name[i] = 0;
         fprintf(stderr, "[MOVIE] mwPlyStartFname(0x%08X, \"%s\")\n", MEM32(esp + 4), name);
         fflush(stderr);
+        rt_sync();
         if (doa2u_movies_enabled()) {
             doa2u_movie_select(name);
         } else {
@@ -374,6 +377,7 @@ void game_pump_vblank_servers(void)
     if (s_last.QuadPart && (now.QuadPart - s_last.QuadPart) * 60 < s_freq.QuadPart) return;
     s_last = now;
     InterlockedIncrement(&g_doa2u_heartbeat);
+    rt_sync();
     doa2u_movie_tick();
 }
 
@@ -432,6 +436,21 @@ void sub_00335A80(void)
 static uint32_t g_pb_parsed = 0;     /* next push-buffer word not yet translated */
 static uint32_t g_pb_cb_arg[2];      /* 0x1D8C / 0x1D90: InsertCallback routine, context */
 static uint32_t g_pb_cbq[64][2], g_pb_cbq_n;
+static SRWLOCK  g_pb_cb_lock = SRWLOCK_INIT;
+static LONG     s_gpu_irq;
+
+/* Game thread: deliver a pending GPU interrupt as KeSetEvent on device+0x1DCC. */
+void doa2u_gpu_irq_poll(void)
+{
+    if (s_gpu_irq && InterlockedExchange(&s_gpu_irq, 0)) {
+        extern void xbox_fiber_wake(uint32_t event_va);
+        uint32_t dev = MEM32(D3D_G_PDEVICE);
+        if (dev) {
+            MEM32(dev + 0x1DCC + 4) = 1;                 /* KEVENT SignalState */
+            xbox_fiber_wake(dev + 0x1DCC);
+        }
+    }
+}
 static uint32_t g_zpass_acc;
 
 /* Visibility tests: ZPASS count via a host occlusion query, GET_REPORT writes the
@@ -464,38 +483,190 @@ static void pb_side_method(uint32_t method, uint32_t param)
     case 0x1D8C: g_pb_cb_arg[0] = param; break;
     case 0x1D90: g_pb_cb_arg[1] = param; break;
     case 0x0100:
+        /* NOP 5: GPU interrupt for the push-buffer space wait (sub_0034A1A8). */
+        if (param == 5) InterlockedExchange(&s_gpu_irq, 1);
+        AcquireSRWLockExclusive(&g_pb_cb_lock);
         if ((param == 6 || param == 7) && g_pb_cb_arg[0] && g_pb_cbq_n < 64) {
             g_pb_cbq[g_pb_cbq_n][0] = g_pb_cb_arg[0];
             g_pb_cbq[g_pb_cbq_n][1] = g_pb_cb_arg[1];
             g_pb_cbq_n++;
         }
+        ReleaseSRWLockExclusive(&g_pb_cb_lock);
         break;
     }
 }
 
-/* Run the callbacks the translated commands reached, once the walker is done. */
+/* Run the callbacks the translated commands reached, always on the game thread. */
 static void pb_run_callbacks(void)
 {
-    uint32_t i, n = g_pb_cbq_n;
+    uint32_t i, n, q[64][2];
+    AcquireSRWLockExclusive(&g_pb_cb_lock);
+    n = g_pb_cbq_n;
+    memcpy(q, g_pb_cbq, n * sizeof q[0]);
     g_pb_cbq_n = 0;
+    ReleaseSRWLockExclusive(&g_pb_cb_lock);
     for (i = 0; i < n; i++) {
-        recomp_func_t fn = recomp_lookup_manual(g_pb_cbq[i][0]);
+        recomp_func_t fn = recomp_lookup_manual(q[i][0]);
         uint32_t sv[7] = { eax, ebx, ecx, edx, esi, edi, esp };
-        if (!fn) fn = recomp_lookup(g_pb_cbq[i][0]);
+        if (!fn) fn = recomp_lookup(q[i][0]);
         if (!fn) continue;
-        PUSH32(esp, g_pb_cbq[i][1]);
+        PUSH32(esp, q[i][1]);
         PUSH32(esp, 0);                       /* dummy return */
         fn();
         eax = sv[0]; ebx = sv[1]; ecx = sv[2]; edx = sv[3]; esi = sv[4]; edi = sv[5]; esp = sv[6];
     }
 }
 
+/* Drawing thread: KickOff queues the new commands and a second thread translates and presents
+ * them, as the NV2A consumes the push buffer alongside the CPU. GET and fences follow its progress. */
+typedef struct { uint32_t *w; uint32_t n, cap; uint32_t get, fence, done; int present; } RtItem;
+#define RT_QN 16
+static RtItem s_rtq[RT_QN];
+static LONG s_rtq_head, s_rtq_tail, s_rt_busy;        /* head: producer, tail: consumer */
+static SRWLOCK s_rt_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE s_rt_cv_work = CONDITION_VARIABLE_INIT, s_rt_cv_done = CONDITION_VARIABLE_INIT;
+static LONG s_rt_present_enq, s_rt_present_done;
+static int s_rt_on = -1, s_rt_collecting;
+static HANDLE s_rt_thread;
+
+static void pb_exec_words(const uint32_t *w, uint32_t n);
+
+static DWORD WINAPI rt_main(LPVOID unused)
+{
+    extern void pgraph_d3d11_flush(void);
+    extern void doa2u_present_host(void);
+    (void)unused;
+    for (;;) {
+        RtItem *it;
+        AcquireSRWLockExclusive(&s_rt_lock);
+        while (s_rtq_tail == s_rtq_head) SleepConditionVariableSRW(&s_rt_cv_work, &s_rt_lock, INFINITE, 0);
+        it = &s_rtq[s_rtq_tail % RT_QN];
+        s_rt_busy = 1;
+        ReleaseSRWLockExclusive(&s_rt_lock);
+        if (it->present) {
+            pgraph_d3d11_flush();
+            doa2u_present_host();
+            InterlockedIncrement(&s_rt_present_done);
+        } else {
+            pb_exec_words(it->w, it->n);
+            MEM32(D3D_FAKE_CHANNEL + 0x44) = it->get;            /* DMA_GET: this batch consumed */
+            if (it->done) {                                      /* its fences retired */
+                MEM32(it->done) = it->fence - 2;
+                nv2a_pgraph_set_reg(0xB10, (it->fence - 2) << 2);
+            }
+            /* The space wait patches its NOP-5 into already-copied commands: interrupt per batch. */
+            InterlockedExchange(&s_gpu_irq, 1);
+        }
+        AcquireSRWLockExclusive(&s_rt_lock);
+        s_rtq_tail++;
+        s_rt_busy = 0;
+        WakeAllConditionVariable(&s_rt_cv_done);
+        ReleaseSRWLockExclusive(&s_rt_lock);
+    }
+}
+
+static int rt_enabled(void)
+{
+    if (s_rt_on < 0) {
+        s_rt_thread = CreateThread(NULL, 0, rt_main, NULL, 0, NULL);
+        s_rt_on = s_rt_thread != NULL;
+    }
+    return s_rt_on;
+}
+
+/* Wait (pumping the window) until fewer than `items` slots are used and <= `presents` pending. */
+static void rt_wait(LONG items, LONG presents)
+{
+    extern void doa2u_pump_messages(void);
+    for (;;) {
+        int ok;
+        AcquireSRWLockExclusive(&s_rt_lock);
+        ok = (s_rtq_head - s_rtq_tail) < items && (s_rt_present_enq - s_rt_present_done) <= presents;
+        if (!ok) SleepConditionVariableSRW(&s_rt_cv_done, &s_rt_lock, 2, 0);
+        ReleaseSRWLockExclusive(&s_rt_lock);
+        if (ok) return;
+        doa2u_pump_messages();
+    }
+}
+
+/* Wait until everything queued is drawn (before game-thread use of the device). */
+static void rt_sync(void)
+{
+    extern void doa2u_pump_messages(void);
+    if (s_rt_on <= 0) return;
+    for (;;) {
+        int idle;
+        AcquireSRWLockExclusive(&s_rt_lock);
+        idle = s_rtq_head == s_rtq_tail && !s_rt_busy;
+        if (!idle) SleepConditionVariableSRW(&s_rt_cv_done, &s_rt_lock, 2, 0);
+        ReleaseSRWLockExclusive(&s_rt_lock);
+        if (idle) return;
+        doa2u_pump_messages();
+    }
+}
+
+/* The slot KickOff fills; waits while the queue is full. */
+static RtItem *rt_slot(void)
+{
+    RtItem *it;
+    rt_wait(RT_QN, 0x7FFFFFFF);
+    it = &s_rtq[s_rtq_head % RT_QN];
+    it->n = 0; it->present = 0; it->done = 0;
+    return it;
+}
+
+static void rt_append(RtItem *it, const uint32_t *w, uint32_t n)
+{
+    if (it->n + n > it->cap) {
+        uint32_t cap = it->cap ? it->cap : 65536;
+        while (cap < it->n + n) cap *= 2;
+        it->w = (uint32_t *)realloc(it->w, (size_t)cap * 4);
+        it->cap = cap;
+    }
+    memcpy(it->w + it->n, w, (size_t)n * 4);
+    it->n += n;
+}
+
+static void rt_publish(void)
+{
+    AcquireSRWLockExclusive(&s_rt_lock);
+    s_rtq_head++;
+    WakeConditionVariable(&s_rt_cv_work);
+    ReleaseSRWLockExclusive(&s_rt_lock);
+}
+
+static RtItem *s_rt_fill;   /* the batch KickOff is collecting into */
+
 /* Translate [from, to). Stops at a JUMP/CALL/RETURN (wrap) and returns the
  * address it stopped at. */
 static uint32_t pb_translate(uint32_t from, uint32_t to)
 {
     extern int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param);
+    extern int pgraph_d3d11_method_bulk(uint32_t method, const uint32_t *params, uint32_t count);
     uint32_t pos = from;
+    if (s_rt_collecting) {
+        /* Same walk without executing: copy the complete packets for the drawing thread. */
+        uint32_t good = from;
+        while (pos + 4 <= to) {
+            uint32_t word = MEM32(pos);
+            if (word == 0) { pos += 4; good = pos; continue; }
+            if ((word & 3) == 1 || (word & 0xE0000003u) == 0x20000000u || word == 0x00020000u ||
+                (word & 3) == 2)
+                break;                               /* jump / call / return: end of run */
+            {
+                uint32_t kind = word & 0xE0030003u;
+                pos += 4;
+                if (kind == 0 || kind == 0x40000000u) {
+                    uint32_t count = (word >> 18) & 0x7FF;
+                    if (pos + count * 4 > to) { pos = to; break; }
+                    pos += count * 4;
+                }
+                good = pos;
+            }
+        }
+        if (good > from) rt_append(s_rt_fill, (const uint32_t *)XBOX_PTR(from), (good - from) / 4);
+        return pos;
+    }
     while (pos + 4 <= to) {
         uint32_t word = MEM32(pos);
         if (word == 0) { pos += 4; continue; }
@@ -511,6 +682,12 @@ static uint32_t pb_translate(uint32_t from, uint32_t to)
                 uint32_t i;
                 pos += 4;
                 if (pos + count * 4 > to) return to;
+                /* Index and inline-vertex runs (no side effects in pb_side_method) in one call. */
+                if ((kind == 0x40000000u || count == 1) &&
+                    pgraph_d3d11_method_bulk(method, (const uint32_t *)XBOX_PTR(pos), count)) {
+                    pos += count * 4;
+                    continue;
+                }
                 for (i = 0; i < count; i++) {
                     uint32_t param = MEM32(pos), m = (kind == 0) ? method + i * 4 : method;
                     pos += 4;
@@ -523,6 +700,31 @@ static uint32_t pb_translate(uint32_t from, uint32_t to)
         }
     }
     return pos;
+}
+
+/* Drawing thread: pb_translate over a copied batch (complete packets, no jumps). */
+static void pb_exec_words(const uint32_t *w, uint32_t n)
+{
+    extern int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param);
+    extern int pgraph_d3d11_method_bulk(uint32_t method, const uint32_t *params, uint32_t count);
+    uint32_t i = 0;
+    while (i < n) {
+        uint32_t word = w[i++], kind = word & 0xE0030003u;
+        if (word == 0 || !(kind == 0 || kind == 0x40000000u)) continue;
+        {
+            uint32_t count = (word >> 18) & 0x7FF, method = word & 0x1FFC, subchan = (word >> 13) & 7, k;
+            if (i + count > n) return;
+            if ((kind == 0x40000000u || count == 1) && pgraph_d3d11_method_bulk(method, w + i, count)) {
+                i += count;
+                continue;
+            }
+            for (k = 0; k < count; k++) {
+                uint32_t param = w[i++], m = (kind == 0) ? method + k * 4 : method;
+                pgraph_d3d11_method((int)subchan, m, param);
+                pb_side_method(m, param);
+            }
+        }
+    }
 }
 
 static void pb_translate_pending(uint32_t dev, uint32_t cursor)
@@ -549,9 +751,27 @@ static void pb_translate_pending(uint32_t dev, uint32_t cursor)
 void sub_00349E80(void)   /* CDevice_KickOff(this = ecx), ret */
 {
     uint32_t dev = ecx;
-    if (dev) {
+    extern int doa2u_movie_active(void);
+    if (dev && rt_enabled() && !doa2u_movie_active()) {
         uint32_t flags  = MEM32(dev + 8);
         uint32_t cursor = (flags & 4) ? MEM32(dev + 0x770) : MEM32(dev);
+        RtItem *it = rt_slot();
+        s_rt_fill = it;
+        s_rt_collecting = 1;
+        pb_translate_pending(dev, cursor);
+        s_rt_collecting = 0;
+        it->get = cursor & 0x0FFFFFFFu;
+        it->fence = MEM32(dev + 0x2C);
+        it->done = MEM32(dev + 0x30);
+        MEM32(dev + 0x1C20) = D3D_FAKE_CHANNEL;
+        MEM32(D3D_FAKE_CHANNEL + 0x40) = cursor & 0x0FFFFFFFu;   /* DMA_PUT */
+        MEM32(dev + 0x1DE4) = MEM32(dev + 0x2478);
+        rt_publish();
+        pb_run_callbacks();
+    } else if (dev) {
+        uint32_t flags  = MEM32(dev + 8);
+        uint32_t cursor = (flags & 4) ? MEM32(dev + 0x770) : MEM32(dev);
+        rt_sync();
         perf_begin(PERF_TRANSLATE);
         pb_translate_pending(dev, cursor);
         perf_end(PERF_TRANSLATE);
@@ -561,7 +781,10 @@ void sub_00349E80(void)   /* CDevice_KickOff(this = ecx), ret */
         MEM32(D3D_FAKE_CHANNEL + 0x44) = cursor & 0x0FFFFFFFu;   /* DMA_GET == PUT */
         {
             uint32_t done = MEM32(dev + 0x30);
-            if (done) MEM32(done) = MEM32(dev + 0x2C) - 2;       /* every inserted fence retired */
+            if (done) {                                          /* every inserted fence retired */
+                MEM32(done) = MEM32(dev + 0x2C) - 2;
+                nv2a_pgraph_set_reg(0xB10, (MEM32(dev + 0x2C) - 2) << 2);
+            }
         }
         MEM32(dev + 0x1DE4) = MEM32(dev + 0x2478);
     }
@@ -626,7 +849,22 @@ void sub_0034AF80(void)
         if (doa2u_movie_active()) {
             extern volatile LONG g_doa2u_heartbeat;
             InterlockedIncrement(&g_doa2u_heartbeat);
+            rt_sync();
             doa2u_movie_tick();
+        } else if (rt_enabled()) {
+            /* Hand the frame to the drawing thread and let the game run one frame ahead. */
+            extern void doa2u_present_game_side(void);
+            extern void doa2u_ui_build(void);
+            RtItem *it;
+            doa2u_present_game_side();
+            doa2u_ui_build();
+            if (g_perf_on) perf_frame();
+            it = rt_slot();
+            it->present = 1;
+            InterlockedIncrement(&s_rt_present_enq);
+            rt_publish();
+            rt_wait(RT_QN + 1, 1);
+            pb_run_callbacks();
         } else {
             pgraph_d3d11_flush();
             doa2u_present_frame();

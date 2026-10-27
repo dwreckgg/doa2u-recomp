@@ -495,6 +495,12 @@ void pvideo_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
  * PGRAPH - graphics engine (stub for Phase 1)
  * ============================================================ */
 
+/* The XDK fence wait (sub_00349D60) spins until 0x400B10 matches the retired fence << 2. */
+void nv2a_pgraph_set_reg(uint32_t addr, uint32_t val)
+{
+    if (g_nv2a && addr < 0x2000) g_nv2a->pgraph.regs[addr] = val;
+}
+
 uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;

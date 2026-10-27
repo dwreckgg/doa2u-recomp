@@ -18,6 +18,7 @@
 #include "d3d8_internal.h"
 #include "d3d8_nv2aff.h"
 static ID3D11Buffer *g_nv2aff_idx_ring;   /* NV2A FF index ring, see d3d8_DrawNv2aFF */
+static ID3D11Buffer *g_nv2araw_defaults;  /* raw arrays: (0,0,0,0) then (0,0,0,1), read at stride 0 */
 static UINT          g_nv2aff_idx_off;
 #include "ui/doa2u_ui.h"
 #include "../kernel/perf.h"
@@ -582,6 +583,7 @@ static ULONG __stdcall dev_Release(IDirect3DDevice8 *self)
         /* Cleanup subsystems first */
         up_ring_shutdown();
         if (g_nv2aff_idx_ring) { ID3D11Buffer_Release(g_nv2aff_idx_ring); g_nv2aff_idx_ring = NULL; g_nv2aff_idx_off = 0; }
+        if (g_nv2araw_defaults) { ID3D11Buffer_Release(g_nv2araw_defaults); g_nv2araw_defaults = NULL; }
         d3d8_Nv2aFF_Shutdown();
         d3d8_vsh_shutdown();
         d3d8_combiners_shutdown();
@@ -2251,6 +2253,77 @@ long d3d8_DrawNv2aFF(const Nv2aFFVertex *verts, unsigned nverts,
     if (g_cur_ib) {
         D3D8IndexBuffer *ib = (D3D8IndexBuffer *)g_cur_ib;
         ID3D11DeviceContext_IASetIndexBuffer(g_device_state.d3d11_context, ib->d3d11_buffer,
+            (ib->format == D3DFMT_INDEX32) ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
+    }
+    return S_OK;
+}
+
+/* Raw guest vertex arrays: all streams in one map, so a ring wrap cannot drop one. */
+#define NV2ARAW_DEFAULTS_SLOT 15
+
+long d3d8_DrawNv2aRaw(int ts, const Nv2aRawStream *streams, unsigned nstreams, const Nv2aRawElem *elems,
+                      const uint16_t *idx, unsigned nidx, int topology, const void *cb)
+{
+    ID3D11DeviceContext *ctx = g_device_state.d3d11_context;
+    ID3D11Buffer *bufs[NV2ARAW_MAX_STREAMS];
+    UINT strides[NV2ARAW_MAX_STREAMS], offs[NV2ARAW_MAX_STREAMS], total = 0, ib_off, i, zero = 0;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    D3D11_MAP map_type;
+    ID3D11InputLayout *layout;
+    if (!idx || !nidx || !nstreams || nstreams > NV2ARAW_MAX_STREAMS) return E_INVALIDARG;
+    if (!g_nv2araw_defaults) {
+        static const float def[8] = { 0, 0, 0, 0, 0, 0, 0, 1 };
+        D3D11_BUFFER_DESC bd; D3D11_SUBRESOURCE_DATA sd;
+        memset(&bd, 0, sizeof bd); memset(&sd, 0, sizeof sd);
+        bd.ByteWidth = sizeof def; bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        sd.pSysMem = def;
+        if (FAILED(ID3D11Device_CreateBuffer(g_device_state.d3d11_device, &bd, &sd, &g_nv2araw_defaults)))
+            return E_FAIL;
+    }
+    if (!g_up_ring_buffer && FAILED(up_ring_init())) return E_OUTOFMEMORY;
+    for (i = 0; i < nstreams; i++) total += (streams[i].size + 15) & ~15u;
+    if (total > UP_RING_BUFFER_SIZE) return E_OUTOFMEMORY;
+    layout = (ID3D11InputLayout *)d3d8_Nv2aRaw_Layout(ts, elems, NV2ARAW_DEFAULTS_SLOT);
+    if (!layout) return E_FAIL;
+    g_d3d_draw_count++; if (g_off_active) g_d3d_draw_off++;
+
+    if (g_up_ring_offset + total > UP_RING_BUFFER_SIZE) { g_up_ring_offset = 0; map_type = D3D11_MAP_WRITE_DISCARD; }
+    else map_type = D3D11_MAP_WRITE_NO_OVERWRITE;
+    if (FAILED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_up_ring_buffer, 0, map_type, 0, &mapped)))
+        return E_OUTOFMEMORY;
+    for (i = 0; i < nstreams; i++) {
+        offs[i] = g_up_ring_offset;
+        memcpy((BYTE *)mapped.pData + offs[i], streams[i].src, streams[i].size);
+        g_up_ring_offset += (streams[i].size + 15) & ~15u;
+        bufs[i] = g_up_ring_buffer;
+        strides[i] = streams[i].stride;
+    }
+    ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_up_ring_buffer, 0);
+    ib_off = nv2aff_idx_upload(idx, nidx * 2);
+    if (ib_off == (UINT)-1) return E_OUTOFMEMORY;
+
+    if (ts) d3d8_shaders_prepare_draw(D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX4 | D3DFVF_NV2A_QR);
+    else    d3d8_shaders_prepare_draw(D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+    d3d8_combiners_prepare_draw();
+    d3d8_states_apply();
+    if (!(ts ? d3d8_Nv2aTS_Bind((const Nv2aTSConstants *)cb) : d3d8_Nv2aFF_Bind((const Nv2aFFConstants *)cb)))
+        return E_FAIL;
+    ID3D11DeviceContext_IASetInputLayout(ctx, layout);
+
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, nstreams, bufs, strides, offs);
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, NV2ARAW_DEFAULTS_SLOT, 1, &g_nv2araw_defaults, &zero, &zero);
+    ID3D11DeviceContext_IASetIndexBuffer(ctx, g_nv2aff_idx_ring, DXGI_FORMAT_R16_UINT, 0);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, (D3D11_PRIMITIVE_TOPOLOGY)topology);
+    ID3D11DeviceContext_DrawIndexed(ctx, nidx, ib_off / 2, 0);
+
+    if (g_cur_vb) {
+        D3D8VertexBuffer *vb = (D3D8VertexBuffer *)g_cur_vb;
+        UINT restore_offset = 0;
+        ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &vb->d3d11_buffer, &g_cur_vb_stride, &restore_offset);
+    }
+    if (g_cur_ib) {
+        D3D8IndexBuffer *ib = (D3D8IndexBuffer *)g_cur_ib;
+        ID3D11DeviceContext_IASetIndexBuffer(ctx, ib->d3d11_buffer,
             (ib->format == D3DFMT_INDEX32) ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT, 0);
     }
     return S_OK;
