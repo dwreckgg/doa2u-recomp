@@ -29,6 +29,7 @@
 #include "xbox_memory_layout.h"
 #include "xbox_fiber.h"
 #include "xbox_det.h"
+#include "save_journal.h"
 #include <stdio.h>
 #include <string.h>
 #include <float.h>
@@ -421,7 +422,7 @@ static void bridge_NtClose(void)
     /* Close real handles but skip fake/synthetic ones */
     if (raw_handle && raw_handle != 0xDEAD0001u &&
         raw_handle != 0xBEEF0010u && h != INVALID_HANDLE_VALUE) {
-        CloseHandle(h);
+        sj_close(h);
     }
     g_eax = 0; /* STATUS_SUCCESS */
 }
@@ -1382,7 +1383,7 @@ static int xbox_fh_release(uint32_t gh)
             { static int nrel = 0;
               if (nrel < 64) { nrel++;
                    } }
-            CloseHandle(s_fh[i]);
+            sj_close(s_fh[i]);    /* a save file's close counts toward the save's end */
             s_fh[i] = NULL;   /* id never reissued; path kept for reopen */
         }
         return 1;
@@ -1555,8 +1556,11 @@ static NTSTATUS bridge_create_file_impl(
             options |= 0x00000001;
     }
     if (options & 0x00000001) { /* FILE_DIRECTORY_FILE */
-        if (disposition == 2 || disposition == 3)
+        if (disposition == 2 || disposition == 3) {
+            if (GetFileAttributesW(win_path) == INVALID_FILE_ATTRIBUTES)
+                sj_before_open_for_write(win_path);   /* a save folder: removed if the save is cut short */
             CreateDirectoryW(win_path, NULL);
+        }
         h = CreateFileW(win_path, win_access, win_share, NULL,
                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
     } else {
@@ -1566,8 +1570,13 @@ static NTSTATUS bridge_create_file_impl(
          * making every ReadFile fail. Buffered host I/O is semantically fine. */
         if (file_attrs & 0x00000001) /* FILE_ATTRIBUTE_READONLY */
             flags_and_attrs |= FILE_ATTRIBUTE_READONLY;
+        /* save files keep their originals until the save is over (save_journal.c) */
+        if (sj_open_modifies(win_access, win_disp, GetFileAttributesW(win_path) != INVALID_FILE_ATTRIBUTES))
+            sj_before_open_for_write(win_path);
         h = CreateFileW(win_path, win_access, win_share, NULL,
                         win_disp, flags_and_attrs, NULL);
+        if (h != INVALID_HANDLE_VALUE && sj_access_writes(win_access))
+            sj_track(h, win_path);
     }
 
     /* NT semantics: a FILE_DIRECTORY_FILE open of an EXISTING regular file must fail
@@ -2161,6 +2170,7 @@ static void bridge_NtDeleteFile(void)
         return;
     }
 
+    sj_before_open_for_write(win_path);    /* a deleted save file comes back if the save is cut short */
     if (DeleteFileW(win_path) || RemoveDirectoryW(win_path))
         g_eax = STATUS_SUCCESS;
     else
@@ -2708,6 +2718,7 @@ static void bridge_HalReturnToFirmware(void)
     }
     fprintf(stderr, "[EXIT] HalReturnToFirmware(%u)%c", STACK_ARG(0), 10);
     fflush(stderr);
+    sj_commit_now();
     ExitProcess(0);
 }
 

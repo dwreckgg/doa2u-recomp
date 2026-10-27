@@ -91,7 +91,9 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_PATH, "Path init: game=%S, save=%S", s_game_dir, s_save_dir);
     {   /* roll back a save the last run did not finish (save_journal.c) */
         extern void sj_init(const WCHAR *save_root);
+        extern void sj_start_timer(void);
         sj_init(s_save_dir);
+        sj_start_timer();                 /* commits each save once it goes quiet */
     }
 }
 

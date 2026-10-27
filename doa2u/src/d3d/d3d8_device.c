@@ -304,7 +304,7 @@ void d3d8_PresentFrame(void)
     /* Pump Windows messages */
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_QUIT) ExitProcess(0);
+        if (msg.message == WM_QUIT) { extern void sj_commit_now(void); sj_commit_now(); ExitProcess(0); }   /* a finished save is kept */
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
@@ -1192,7 +1192,7 @@ static HRESULT __stdcall dev_Present(IDirect3DDevice8 *self, const RECT *src, co
      * the window responsive and handle input. */
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_QUIT) ExitProcess(0);
+        if (msg.message == WM_QUIT) { extern void sj_commit_now(void); sj_commit_now(); ExitProcess(0); }   /* a finished save is kept */
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
@@ -2270,7 +2270,7 @@ static HRESULT __stdcall dev_Swap(IDirect3DDevice8 *self, DWORD Flags)
     /* Pump Windows messages (same as dev_Present) */
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-        if (msg.message == WM_QUIT) ExitProcess(0);
+        if (msg.message == WM_QUIT) { extern void sj_commit_now(void); sj_commit_now(); ExitProcess(0); }   /* a finished save is kept */
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }

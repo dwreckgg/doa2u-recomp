@@ -9,7 +9,6 @@
  */
 
 #include "kernel.h"
-#include "save_journal.h"
 #include <string.h>
 
 /* ============================================================================
@@ -123,20 +122,13 @@ NTSTATUS __stdcall xbox_NtCreateFile(
         if (FileAttributes & XBOX_FILE_ATTRIBUTE_READONLY)
             flags_and_attrs |= FILE_ATTRIBUTE_READONLY;
 
-        /* A save-partition file opened to change it is journaled first, since
-         * some dispositions truncate at open (save_journal.c). */
-        const DWORD access = xbox_access_to_win32(DesiredAccess);
-        const int modifies = (access & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE)) ||
-                             CreateDisposition != XBOX_FILE_OPEN;
-        if (modifies) sj_before_open_for_write(win_path);
         h = CreateFileW(win_path,
-            access,
+            xbox_access_to_win32(DesiredAccess),
             xbox_share_to_win32(ShareAccess),
             NULL,
             xbox_disposition_to_win32(CreateDisposition),
             flags_and_attrs,
             NULL);
-        if (modifies) sj_track(h, win_path);
     }
 
     if (h == INVALID_HANDLE_VALUE) {
@@ -291,7 +283,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
 {
     XBOX_TRACE(XBOX_LOG_FILE, "NtClose(handle=%p)", Handle);
     if (Handle && Handle != INVALID_HANDLE_VALUE) {
-        sj_close(Handle);        /* closes it; a save's last handle commits the journal */
+        CloseHandle(Handle);
         return STATUS_SUCCESS;
     }
     return STATUS_INVALID_HANDLE;
@@ -310,11 +302,8 @@ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
 
     XBOX_TRACE(XBOX_LOG_FILE, "NtDeleteFile: %S", win_path);
 
-    sj_before_open_for_write(win_path);
-    if (DeleteFileW(win_path)) {
-        sj_commit_if_idle();
+    if (DeleteFileW(win_path))
         return STATUS_SUCCESS;
-    }
 
     /* Try removing as directory */
     if (RemoveDirectoryW(win_path))

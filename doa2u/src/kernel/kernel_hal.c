@@ -12,6 +12,7 @@
  */
 
 #include "kernel.h"
+#include "save_journal.h"
 #include <intrin.h>
 
 /* ============================================================================
@@ -246,12 +247,14 @@ VOID __stdcall xbox_HalReturnToFirmware(ULONG Routine)
 {
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_HAL,
         "HalReturnToFirmware: routine=%u (exiting)", Routine);
+    sj_commit_now();
     ExitProcess(0);
 }
 
 VOID __stdcall xbox_HalInitiateShutdown(void)
 {
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_HAL, "HalInitiateShutdown (exiting)");
+    sj_commit_now();
     ExitProcess(0);
 }
 

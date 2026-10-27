@@ -126,6 +126,7 @@ void doa2u_pump_messages(void)
         if (msg.message == WM_QUIT) {
             fprintf(stderr, "[EXIT] window closed by user\n");
             fflush(stderr);
+            { extern void sj_commit_now(void); sj_commit_now(); }   /* a finished save is kept */
             ExitProcess(0);
         }
         TranslateMessage(&msg);
