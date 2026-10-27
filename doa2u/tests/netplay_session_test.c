@@ -183,10 +183,10 @@ static void test_record_and_replay(void)
 }
 
 /* Lockstep from boot (spec section 12): requested before the guest runs (saves
- * go aside at once), the clocks and the chip armed at the first pad-builder
- * call (the engine's start-up cannot run on frame-counted time: every boot
- * stalled at the intro movie, 2026-10-27), the regions captured there and put
- * back by a replay; leaving Versus does not end it; a recording from boot
+ * go aside and movies are skipped at once: movie playback stalls on
+ * frame-counted time, 2026-10-27), the clocks and the chip armed at the first
+ * pad-builder call, the regions captured there and put back by a replay, the
+ * pad history cleared; leaving Versus does not end it; a recording from boot
  * replays from boot. */
 static void test_boot_session(void)
 {
@@ -204,26 +204,16 @@ static void test_boot_session(void)
     CHECK(st().state == NP_STATE_ACTIVE);
     CHECK(g_det_begin == det0 && g_apu_begin == apu0);             /* not before the first frame */
     CHECK(fg.redirect == 1);                                      /* saves aside from the start */
+    CHECK(netplay_skip_movies() == 1);                            /* the intro never plays */
     CHECK(netplay_session_frame() == 0);
     memcpy(&seed, fg_mem(FG_SEED), 4);
     CHECK(seed == 12345u);                                        /* no guest write before frame 0 */
     fg_mem(FG_FIGHTERS)[3] = 0x5A;                                /* boot left this behind */
-    fg.screen = 0;                                                /* before the frame loop's first screen */
-    for (i = 0; i < 70; i++) tick();
-    CHECK(g_det_begin == det0);                                   /* no screen yet: not frame 0 */
-    fg.screen = 1;
-    fg.movie = 1;                                                 /* the intro: not frame 0 yet */
-    for (i = 0; i < 5; i++) { fg.host[0].buttons = 0x10; tick(); }
-    fg.movie = 0;                                                 /* the gap between two intro movies */
-    for (i = 0; i < 3; i++) tick();
-    fg.movie = 1;
-    for (i = 0; i < 5; i++) tick();
-    fg.movie = 0;
-    for (i = 0; i < 59; i++) tick();
-    CHECK(g_det_begin == det0 && netplay_session_frame() == 0);   /* 59 quiet frames: still the intro */
-    fg.host[0].buttons = 0;
+    fg_mem(FG_PADS)[0] = 0x10;                                    /* a press before the session's frame 0 */
+    fg.screen = 0;                                                /* the first frame-loop tick has no screen yet */
     script(0);
-    tick();                                                       /* the 60th: frame 0 */
+    tick();                                                       /* frame 0 */
+    CHECK(netplay_session_frame() == 1);
     CHECK(g_det_begin == det0 + 1 && g_apu_begin == apu0 + 1);     /* armed at frame 0 */
     CHECK(fg.worker_seed != 0);
     memcpy(&seed, fg_mem(FG_SEED), 4);
@@ -235,6 +225,7 @@ static void test_boot_session(void)
     netplay_set_armed(0, NP_ROLE_HOST);
     tick();
     CHECK(st().state == NP_STATE_OFF);
+    CHECK(netplay_skip_movies() == 0);                            /* out of a session movies play */
     s = st();
     CHECK(strncmp(s.message, "Recorded netplay_replay_", 24) == 0);
     netplay_set_record(0);
@@ -246,7 +237,7 @@ static void test_boot_session(void)
     reset_screens();
     fg_mem(FG_FIGHTERS)[3] = 0xC3;
     CHECK(netplay_boot_begin(0, name));
-    for (i = 0; i < 200 && st().state == NP_STATE_ACTIVE; i++) { script(netplay_session_frame()); tick(); }   /* 60 quiet ticks, then the frames */
+    for (i = 0; i < 80 && st().state == NP_STATE_ACTIVE; i++) { script(netplay_session_frame()); tick(); }
     s = st();
     CHECK(s.state == NP_STATE_OFF);
     if (strncmp(s.message, "Replay matched", 14)) fprintf(stderr, "boot replay: %s\n", s.message);

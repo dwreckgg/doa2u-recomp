@@ -212,9 +212,6 @@ void np_game_layout_read(int port, uint8_t *layout, uint8_t *laysel)
 
 void np_game_title_redirect(int on) { xbox_path_set_title_redirect(on); }
 
-int doa2u_movie_active(void);                /* game/movie_present.c */
-int np_game_movie_playing(void) { return doa2u_movie_active(); }
-
 /* The builder's per-pad aggregates (the "pads" region): last frame's buttons,
  * press edges and repeat counters. The pad-forcing path clears the same block
  * (doa2u_netplay_force_pads in recomp_manual.c). */

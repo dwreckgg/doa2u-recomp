@@ -364,6 +364,25 @@ void sub_0031BBB0(void)
     sub_0031BBB0_gen();
 }
 
+/* Movie start (0x000F9E10, cdecl, one argument: the movie number). Every movie
+ * runs through it: the intro (sub_000D9300 loops on the finished check
+ * sub_000FA170) and four other callers. In an online or local session it returns
+ * at once: the handle at 0xA94478 stays 0, which the finished check reads as
+ * done, so the caller's own end path runs on the next check and the teardown
+ * finds nothing to stop. Movie playback stalls on the session's frame-counted
+ * clock (every boot armed before the intro stalled at its start, 2026-10-27),
+ * and decoding speed must not decide when either machine moves on. */
+void sub_000F9E10_gen(void);
+void sub_000F9E10(void)
+{
+    if (netplay_hook_skip_movies()) {
+        MEM8(0x00A94451u) = (uint8_t)MEM32(esp + 4);   /* the movie number, as the start writes it */
+        esp += 4;                                       /* ret: cdecl, the caller pops its argument */
+        return;
+    }
+    sub_000F9E10_gen();
+}
+
 /* Movie teardown (0x000F9A10): stops and destroys the mwPly handle at 0xA942D8, on
  * both end of stream and START pressed. The host presenter runs on its own clock and
  * only stops at end of file, so on a skip it kept owning the screen (guest frames are

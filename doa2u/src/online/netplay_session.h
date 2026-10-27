@@ -81,6 +81,10 @@ void netplay_request_replay(const char *path);   /* loaded at the next input tic
  * (a recording made from boot). Frames count from the first input tick and
  * the session lasts until disarmed or, for a replay, the recording's end. */
 int  netplay_boot_begin(uint32_t seed, const char *replay_path);
+/* In a session every movie is skipped (the game's movie start returns at once
+ * and its own finished check ends the movie): playback stalls on frame-counted
+ * time, and an online session must not depend on host-timed decoding. */
+int  netplay_skip_movies(void);
 int  netplay_list_replays(char (*names)[128], int max);
 
 /* Game hooks (recomp_manual.c, through netplay_frame_hook). */

@@ -31394,7 +31394,7 @@ loc_000F9E00: ;
  * CC: cdecl, 0 params, returns int_or_void
  * Frame: fpo_leaf
  */
-void sub_000F9E10(void)
+void sub_000F9E10_gen(void)
 {
     uint32_t ebp;
     int _flags = 0; /* fallback flag var */

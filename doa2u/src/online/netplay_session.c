@@ -76,8 +76,6 @@ static uint32_t  s_scratch_len;
 static int       s_tables_checked, s_tables_ok;
 static int       s_boot;              /* armed before the guest's entry (spec section 12) */
 static int       s_boot_armed;        /* clocks, chip and seeds in (frame 0 of a boot session) */
-static uint32_t  s_boot_quiet;        /* frame-loop ticks since a movie last played */
-#define BOOT_QUIET_FRAMES 60u
 
 /* ── tables ─────────────────────────────────────────────────────────── */
 
@@ -550,7 +548,6 @@ int netplay_boot_begin(uint32_t seed, const char *replay_path)
     s_transitions = 0;
     s_seed_va = 0;                                         /* found at frame 0: no guest code runs before */
     s_boot_armed = 0;                                      /* clocks, chip and seeds go in at frame 0 */
-    s_boot_quiet = 0;
     np_game_title_redirect(1);                             /* saves aside until the process exits */
     np_game_session_reset();
     s_state = NP_STATE_ACTIVE;
@@ -653,22 +650,13 @@ void netplay_input_tick(void)
     }
 
 frame:
-    if (s_boot && !s_boot_armed) {
-        /* The intro: local pads, host time, until the frame loop shows a screen
-         * and no movie has played for BOOT_QUIET_FRAMES (the two intro movies
-         * have a gap between them; the first frame-loop tick comes before the
-         * first movie starts). */
-        if (np_game_screen_key() == 0 || np_game_movie_playing()) { s_boot_quiet = 0; return; }
-        if (++s_boot_quiet < BOOT_QUIET_FRAMES) return;
-    }
     if (s_boot && s_frame == 0 && !s_boot_armed) {
-        /* Frame 0 of a boot session: the first frame-loop tick with no movie on
-         * screen. The engine's movie playback stalls on frame-counted time (every
-         * boot armed before the intro movie stalled at its start, 2026-10-27),
-         * so the intro runs on host time and the session starts after it. The
-         * CRT is up, so the seed word can be found; what start-up left in the
-         * regions is captured (record, live) or put back (replay); the screen it
-         * starts on is not a transition. */
+        /* Frame 0 of a boot session: the first frame-loop tick (the frame loop
+         * starts about a second after launch, before the intro; the intro movies
+         * are skipped, see netplay_skip_movies). The CRT is up, so the seed word
+         * can be found; what start-up left in the regions is captured (record,
+         * live) or put back (replay); the screen it starts on is not a
+         * transition. */
         xbox_det_bases b;
         s_boot_armed = 1;
         if (s_replaying) sync_write(s_params.sync);
@@ -759,6 +747,7 @@ uint32_t netplay_filter_pad_mask(uint32_t host_mask)
 }
 
 uint32_t netplay_session_frame(void) { return s_frame; }
+int netplay_skip_movies(void) { return s_state == NP_STATE_ACTIVE; }
 uint32_t netplay_seed_va(void) { return s_state == NP_STATE_ACTIVE ? s_seed_va : 0; }
 
 /* ── UI ─────────────────────────────────────────────────────────────── */

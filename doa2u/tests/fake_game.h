@@ -26,7 +26,6 @@ typedef struct {
     uint32_t packet[4];
     uint32_t forced;
     int      force_calls, rebuilds, redirect, session_resets, on_worker;
-    int      movie;                   /* a movie is playing (the intro, attract) */
     uint32_t worker_seed;
 } fake_game_state;
 
