@@ -215,7 +215,8 @@ static void doa2u_watchdog_start(void)
 
 /* Present the host swap chain once per guest frame (called from the
  * D3DDevice_Swap override in recomp_manual.c) and pump the window. */
-void doa2u_present_frame(void)
+/* The game thread's half of a frame end: audio interrupt and the window queue. */
+void doa2u_present_game_side(void)
 {
     InterlockedIncrement(&g_doa2u_heartbeat);
     {
@@ -225,6 +226,11 @@ void doa2u_present_frame(void)
         perf_end(PERF_AUDIO);
     }
     doa2u_pump_messages();
+}
+
+/* The other half, on whichever thread owns the graphics device. */
+void doa2u_present_host(void)
+{
     {
         extern int doa2u_movie_host_owns_screen(void);
         extern void d3d8_note_game_frame(void);
@@ -237,6 +243,12 @@ void doa2u_present_frame(void)
     }
     if (g_d3d_device)
         g_d3d_device->lpVtbl->Present(g_d3d_device, NULL, NULL, NULL, NULL);
+}
+
+void doa2u_present_frame(void)
+{
+    doa2u_present_game_side();
+    doa2u_present_host();
 }
 
 extern volatile uint32_t g_icall_trace[16];

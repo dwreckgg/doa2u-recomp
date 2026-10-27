@@ -2900,11 +2900,148 @@ static void nv_ff_constants(Nv2aFFConstants *cb, const NvBatchCtx *ctx, int lit,
                (has_color ? NV2AFF_FLAG_HAS_COLOR : 0);
 }
 
+/* Raw vertex arrays: the GPU decodes the guest attribute bytes. Each format below gives
+ * the values nv_fetch_attr would; anything else keeps the packing path. */
+typedef struct {
+    Nv2aRawStream st[NV2ARAW_MAX_STREAMS];
+    unsigned      nst;
+    Nv2aRawElem   el[8];
+} NvRaw;
+
+/* The IA format for one slot, and its size in bytes; 0 = not expressible. */
+static int nv_raw_fmt(int colour, uint32_t type, uint32_t count, uint8_t *fmt, uint32_t *size)
+{
+    if (colour) {   /* nv_fetch_attr's out_color: the raw D3DCOLOR, or RGBA bytes reordered */
+        if (type == 0) { *fmt = NV2ARAW_F_B8G8R8A8; *size = 4; return 1; }
+        if (type == 4) { *fmt = NV2ARAW_F_R8G8B8A8; *size = 4; return 1; }
+        return 0;
+    }
+    switch (type) {
+    case 2: if (count < 1 || count > 4) return 0;
+            *fmt = (uint8_t)(NV2ARAW_F_R32 + count - 1); *size = 4 * count; return 1;
+    case 0: case 4:   /* UB_D3D swaps 0/2 only from 3 components up, as B8G8R8A8 does */
+            if (count == 1) { *fmt = NV2ARAW_F_R8;   *size = 1; return 1; }
+            if (count == 2) { *fmt = NV2ARAW_F_R8G8; *size = 2; return 1; }
+            if (count == 4) { *fmt = type ? NV2ARAW_F_R8G8B8A8 : NV2ARAW_F_B8G8R8A8; *size = 4; return 1; }
+            return 0;
+    case 1: if (count == 1) { *fmt = NV2ARAW_F_S16;    *size = 2; return 1; }
+            if (count == 2) { *fmt = NV2ARAW_F_S16S16; *size = 4; return 1; }
+            if (count == 4) { *fmt = NV2ARAW_F_S16X4;  *size = 8; return 1; }
+            return 0;
+    default: return 0;
+    }
+}
+
+/* slot[e] = NV2A attribute slot feeding element e, or -1 for its default
+ * (defoff[e]: 0 = zeros, 16 = (0,0,0,1)). Interleaved slots share one stream. */
+static int nv_raw_build(unsigned ne, const int *slot, const int *colour, const uint8_t *defoff,
+                        uint32_t lo, uint32_t hi, NvRaw *r)
+{
+    extern ptrdiff_t g_xbox_mem_offset;
+    uint32_t gmin[NV2ARAW_MAX_STREAMS], gmax[NV2ARAW_MAX_STREAMS], gstride[NV2ARAW_MAX_STREAMS];
+    uint32_t gend[NV2ARAW_MAX_STREAMS], ebase[8], esize[8];
+    unsigned e, g, ng = 0;
+    int egrp[8];
+    for (e = 0; e < ne; e++) {
+        uint32_t fmt, base, stride;
+        uint8_t f;
+        egrp[e] = -1;
+        if (slot[e] < 0) {
+            r->el[e].stream = NV2ARAW_DEFAULTS; r->el[e].fmt = NV2ARAW_F_R32G32B32A32; r->el[e].offset = defoff[e];
+            continue;
+        }
+        fmt = g_pg.attr_fmt[slot[e]]; base = g_pg.attr_off[slot[e]]; stride = fmt >> 8;
+        if (!nv_raw_fmt(colour[e], fmt & 0xF, (fmt >> 4) & 0xF, &f, &esize[e])) return 0;
+        if ((base & 3) || (stride & 3) || stride > 2048) return 0;
+        r->el[e].fmt = f;
+        ebase[e] = base;
+        for (g = 0; g < ng; g++) {
+            uint32_t mn = base < gmin[g] ? base : gmin[g], mx = base > gmax[g] ? base : gmax[g];
+            if (gstride[g] == stride && (stride ? mx - mn < stride : mx == mn)) { gmin[g] = mn; gmax[g] = mx; break; }
+        }
+        if (g == ng) {
+            if (ng == NV2ARAW_MAX_STREAMS) return 0;
+            gmin[g] = gmax[g] = base; gstride[g] = stride; ng++;
+        }
+        egrp[e] = (int)g;
+    }
+    if (!ng) return 0;
+    for (g = 0; g < ng; g++) gend[g] = 0;
+    for (e = 0; e < ne; e++) {
+        uint32_t end;
+        if (egrp[e] < 0) continue;
+        g = (unsigned)egrp[e];
+        end = ebase[e] + hi * gstride[g] + esize[e];
+        if (end < ebase[e] || end > 0x08000000u) return 0;
+        if (end > gend[g]) gend[g] = end;
+    }
+    for (e = 0; e < ne; e++)
+        if (egrp[e] >= 0) {
+            r->el[e].stream = (uint8_t)egrp[e];
+            r->el[e].offset = (uint16_t)(ebase[e] - gmin[egrp[e]]);
+        }
+    for (g = 0; g < ng; g++) {
+        uint32_t start = gmin[g] + lo * gstride[g];
+        r->st[g].src = (const void *)((uintptr_t)start + g_xbox_mem_offset);
+        r->st[g].size = gend[g] - start;
+        r->st[g].stride = gstride[g];
+    }
+    r->nst = ng;
+    return 1;
+}
+
+/* The batch's indices rebased to lo, expanded for quads and fans, as packed slots. */
+static uint32_t nv_raw_indices(uint32_t n, uint32_t lo, int prim, int is_quads)
+{
+    uint32_t i, ni = 0;
+    if (is_quads) {
+        uint32_t q;
+        for (q = 0; q + 3 < n; q += 4) {
+            s_gi[ni++] = (uint16_t)(g_pg.idx[q + 0] - lo); s_gi[ni++] = (uint16_t)(g_pg.idx[q + 1] - lo);
+            s_gi[ni++] = (uint16_t)(g_pg.idx[q + 2] - lo); s_gi[ni++] = (uint16_t)(g_pg.idx[q + 0] - lo);
+            s_gi[ni++] = (uint16_t)(g_pg.idx[q + 2] - lo); s_gi[ni++] = (uint16_t)(g_pg.idx[q + 3] - lo);
+        }
+    } else if (prim == D3DPT_TRIANGLEFAN) {
+        for (i = 2; i < n; i++) {
+            s_gi[ni++] = (uint16_t)(g_pg.idx[0] - lo); s_gi[ni++] = (uint16_t)(g_pg.idx[i - 1] - lo);
+            s_gi[ni++] = (uint16_t)(g_pg.idx[i] - lo);
+        }
+    } else {
+        for (i = 0; i < n; i++) s_gi[ni++] = (uint16_t)(g_pg.idx[i] - lo);
+    }
+    return ni;
+}
+
+/* The packing loop's per-vertex checks: non-finite position (-1) and the colour summary. */
+static int nv_raw_scan(uint32_t n, int has_color, int *all_zero)
+{
+    extern ptrdiff_t g_xbox_mem_offset;
+    uint32_t pf = g_pg.attr_fmt[0], pb = g_pg.attr_off[0], ps = pf >> 8, pc = (pf >> 4) & 0xF;
+    uint32_t cb = g_pg.attr_off[3], cs = g_pg.attr_fmt[3] >> 8, i, c;
+    *all_zero = 1;
+    for (i = 0; i < n; i++) {
+        uint32_t idx = g_pg.idx[i];
+        if ((pf & 0xF) == 2) {
+            const uint8_t *p = (const uint8_t *)((uintptr_t)(pb + idx * ps) + g_xbox_mem_offset);
+            for (c = 0; c < pc && c < 4; c++) {
+                uint32_t bits; memcpy(&bits, p + 4 * c, 4);
+                if ((bits & 0x7F800000u) == 0x7F800000u) return -1;
+            }
+        }
+        if (has_color && *all_zero) {
+            uint32_t v; memcpy(&v, (const uint8_t *)((uintptr_t)(cb + idx * cs) + g_xbox_mem_offset), 4);
+            if (v) *all_zero = 0;
+        }
+    }
+    return 0;
+}
+
 /* 1 = drawn (or legitimately dropped) on the GPU, 0 = use the CPU path. */
 static int nv_gpu_ff_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int prim, int is_quads)
 {
     uint32_t n = g_pg.idx_count, i, lo = 0, nv = 0, ni = 0, need_idx;
-    int has_color, has_uv, lit, all_zero = 1;
+    int has_color, has_uv, lit, all_zero = 1, use_raw = 0;
+    NvRaw raw;
     Nv2aFFConstants cb;
     NvDrawSummary sum;
     NvPostOps post;
@@ -2933,8 +3070,23 @@ static int nv_gpu_ff_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int pr
     if (s_gi_cap < need_idx) { void *b = realloc(s_gi, need_idx * sizeof *s_gi); if (!b) return 0; s_gi = b; s_gi_cap = need_idx; }
     if (s_gs_cap < n)        { void *b = realloc(s_gs, n * sizeof *s_gs); if (!b) return 0; s_gs = b; s_gs_cap = n; }
 
+    if (!skinned) {   /* raw arrays: POSITION, NORMAL, COLOR0, TEXCOORD0 */
+        static const int colour[4] = { 0, 0, 1, 0 };
+        static const uint8_t defoff[4] = { 0, 0, 0, 0 };
+        int slot[4];
+        uint32_t hi = lo;
+        for (i = 0; i < n; i++) if (g_pg.idx[i] > hi) hi = g_pg.idx[i];
+        slot[0] = 0; slot[1] = lit ? 2 : -1; slot[2] = has_color ? 3 : -1; slot[3] = has_uv ? 9 : -1;
+        if (nv_raw_build(4, slot, colour, defoff, lo, hi, &raw)) {
+            if (nv_raw_scan(n, has_color, &all_zero) < 0) { g_gpuff_stat[3]++; return 1; }
+            ni = nv_raw_indices(n, lo, prim, is_quads);
+            nv = hi - lo + 1;
+            use_raw = 1;
+        }
+    }
+
     /* Pack each unique vertex once; map every source index to its slot. */
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n && !use_raw; i++) {
         uint32_t idx = g_pg.idx[i], d = idx - lo;
         if (s_vstamp[d] == s_vgen) { s_gs[i] = (uint16_t)s_vslot[d]; continue; }
         {
@@ -2959,7 +3111,9 @@ static int nv_gpu_ff_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int pr
             nv++;
         }
     }
-    if (is_quads) {
+    if (use_raw) {
+        /* indices built above */
+    } else if (is_quads) {
         uint32_t q;
         for (q = 0; q + 3 < n; q += 4) {
             s_gi[ni++] = s_gs[q + 0]; s_gi[ni++] = s_gs[q + 1]; s_gi[ni++] = s_gs[q + 2];
@@ -3002,10 +3156,10 @@ static int nv_gpu_ff_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int pr
 
     {
         int clipped = nv_apply_window_clip();
+        int topo = (prim == D3DPT_TRIANGLESTRIP) ? 5 /* D3D11 TRIANGLESTRIP */ : 4 /* TRIANGLELIST */;
         dev->lpVtbl->BeginScene(dev);
-        d3d8_DrawNv2aFF(s_gv, nv, s_gi, ni,
-                        (prim == D3DPT_TRIANGLESTRIP) ? 5 /* D3D11 TRIANGLESTRIP */ : 4 /* TRIANGLELIST */,
-                        &cb);
+        if (use_raw) d3d8_DrawNv2aRaw(0, raw.st, raw.nst, raw.el, s_gi, ni, topo, &cb);
+        else         d3d8_DrawNv2aFF(s_gv, nv, s_gi, ni, topo, &cb);
         if (clipped) { extern void d3d8_ResetScissorRect(void); d3d8_ResetScissorRect(); }
     }
     g_gpuff_stat[0]++;
@@ -3228,8 +3382,9 @@ static int nv_gpu_ts_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int pr
                             uint32_t shader_prog, const float rs[4], const float rt[4])
 {
     uint32_t n = g_pg.idx_count, i, lo = 0, nv = 0, ni = 0, need_idx;
-    int lit, has_color, nrm_ok, t, c;
+    int lit, has_color, nrm_ok, t, c, use_raw = 0;
     int gen, skinned = nv_skin_count(&gen) != 0;
+    NvRaw raw;
     uint32_t spec_type = g_pg.attr_fmt[4] & 0xF;
     Nv2aTSConstants cb;
     static int s_flip = -1;
@@ -3249,8 +3404,24 @@ static int nv_gpu_ts_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int pr
     if (s_gi_cap < need_idx) { void *b = realloc(s_gi, need_idx * sizeof *s_gi); if (!b) return 0; s_gi = b; s_gi_cap = need_idx; }
     if (s_gs_cap < n)        { void *b = realloc(s_gs, n * sizeof *s_gs); if (!b) return 0; s_gs = b; s_gs_cap = n; }
 
+    if (!skinned) {   /* raw arrays: POSITION, NORMAL, COLOR0, COLOR1, TEXCOORD0..3 */
+        static const int colour[8] = { 0, 0, 1, 1, 0, 0, 0, 0 };
+        static const uint8_t defoff[8] = { 0, 0, 0, 0, 16, 16, 16, 16 };
+        int slot[8], all_zero;
+        uint32_t hi = lo;
+        for (i = 0; i < n; i++) if (g_pg.idx[i] > hi) hi = g_pg.idx[i];
+        slot[0] = 0; slot[1] = nrm_ok ? 2 : -1; slot[2] = has_color ? 3 : -1;
+        slot[3] = nv_attr_enabled(4) ? 4 : -1;
+        for (t = 0; t < 4; t++) slot[4 + t] = nv_attr_enabled(9 + t) ? 9 + t : -1;
+        if (nv_raw_build(8, slot, colour, defoff, lo, hi, &raw)) {
+            if (nv_raw_scan(n, 0, &all_zero) < 0) { d3d8_Nv2aPS_Disarm(); return 1; }
+            ni = nv_raw_indices(n, lo, prim, is_quads);
+            use_raw = 1;
+        }
+    }
+
     /* Pack each unique vertex once, raw as nv_build_array_vertex reads it. */
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n && !use_raw; i++) {
         uint32_t idx = g_pg.idx[i], d = idx - lo;
         Nv2aTSVertex *v;
         float tmp[4];
@@ -3279,7 +3450,9 @@ static int nv_gpu_ts_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int pr
         s_gs[i] = (uint16_t)nv;
         nv++;
     }
-    if (is_quads) {
+    if (use_raw) {
+        /* indices built above */
+    } else if (is_quads) {
         uint32_t q;
         for (q = 0; q + 3 < n; q += 4) {
             s_gi[ni++] = s_gs[q + 0]; s_gi[ni++] = s_gs[q + 1]; s_gi[ni++] = s_gs[q + 2];
@@ -3317,10 +3490,10 @@ static int nv_gpu_ts_submit(IDirect3DDevice8 *dev, const NvBatchCtx *ctx, int pr
     nv_ts_bind(dev, shader_prog, 0);
     {
         int clipped = nv_apply_window_clip();
+        int topo = (prim == D3DPT_TRIANGLESTRIP) ? 5 /* D3D11 TRIANGLESTRIP */ : 4 /* TRIANGLELIST */;
         dev->lpVtbl->BeginScene(dev);
-        d3d8_DrawNv2aTS(s_tsv, nv, s_gi, ni,
-                        (prim == D3DPT_TRIANGLESTRIP) ? 5 /* D3D11 TRIANGLESTRIP */ : 4 /* TRIANGLELIST */,
-                        &cb);
+        if (use_raw) d3d8_DrawNv2aRaw(1, raw.st, raw.nst, raw.el, s_gi, ni, topo, &cb);
+        else         d3d8_DrawNv2aTS(s_tsv, nv, s_gi, ni, topo, &cb);
         if (clipped) { extern void d3d8_ResetScissorRect(void); d3d8_ResetScissorRect(); }
     }
     nv_ts_done(dev, ni);
@@ -4391,6 +4564,34 @@ static void nv_mtab_init(void)
         e->cslot = (int8_t)slot;
     }
     s_mtab_ready = 1;
+}
+
+/* Index/inline-vertex packet in one call, same stores as pgraph_d3d11_method. 0 = not handled. */
+int pgraph_d3d11_method_bulk(uint32_t method, const uint32_t *params, uint32_t count)
+{
+    extern uint32_t g_mhist[0x800];
+    uint32_t i;
+    if (!count || (method != 0x1800 && method != 0x1808 && method != NV097_INLINE_ARRAY)) return 0;
+    g_pg_reg[method >> 2] = params[count - 1];
+    if (!g_pg.initialized) return 1;
+    g_pg.stats.methods_handled += count;
+    g_mhist[method >> 2] += count;
+    if (!g_pg.in_draw) return 1;
+    if (method == 0x1800) {          /* ARRAY_ELEMENT16: two indices per dword */
+        for (i = 0; i < count; i++) {
+            if (g_pg.idx_count < MAX_IDX) g_pg.idx[g_pg.idx_count++] = params[i] & 0xFFFFu; else g_pg.idx_dropped++;
+            if (g_pg.idx_count < MAX_IDX) g_pg.idx[g_pg.idx_count++] = params[i] >> 16; else g_pg.idx_dropped++;
+        }
+    } else if (method == 0x1808) {   /* ARRAY_ELEMENT32 */
+        for (i = 0; i < count; i++)
+            if (g_pg.idx_count < MAX_IDX) g_pg.idx[g_pg.idx_count++] = params[i]; else g_pg.idx_dropped++;
+    } else {                         /* INLINE_ARRAY */
+        uint32_t room = MAX_INLINE_VERTS * INLINE_VERT_DWORDS - g_pg.inline_count;
+        uint32_t n = count < room ? count : room;
+        memcpy(&g_pg.inline_data[g_pg.inline_count], params, n * 4);
+        g_pg.inline_count += n;
+    }
+    return 1;
 }
 
 int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param)

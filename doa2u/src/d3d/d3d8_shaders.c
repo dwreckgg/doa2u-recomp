@@ -1254,10 +1254,12 @@ static const char g_nv2aff_vs_source[] =
 static ID3D11VertexShader *g_nv2aff_vs, *g_nv2ats_vs;
 static ID3D11InputLayout  *g_nv2aff_layout, *g_nv2ats_layout;
 static ID3D11Buffer       *g_nv2aff_cb, *g_nv2ats_cb;
+static ID3DBlob           *g_nv2aff_code, *g_nv2ats_code;   /* kept for the raw-array layouts */
 
 /* One variant of the shader: compile, create it, its layout and its constant buffer. */
 static HRESULT nv2aff_build(const char *ts, const D3D11_INPUT_ELEMENT_DESC *elems, UINT n, UINT cb_size,
-                            ID3D11VertexShader **vs, ID3D11InputLayout **layout, ID3D11Buffer **cb)
+                            ID3D11VertexShader **vs, ID3D11InputLayout **layout, ID3D11Buffer **cb,
+                            ID3DBlob **code)
 {
     ID3DBlob *blob = NULL, *errors = NULL;
     D3D11_BUFFER_DESC cbd;
@@ -1278,8 +1280,8 @@ static HRESULT nv2aff_build(const char *ts, const D3D11_INPUT_ELEMENT_DESC *elem
     if (SUCCEEDED(hr))
         hr = ID3D11Device_CreateInputLayout(d3d8_GetD3D11Device(), elems, n,
             ID3D10Blob_GetBufferPointer(blob), ID3D10Blob_GetBufferSize(blob), layout);
-    ID3D10Blob_Release(blob);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) { ID3D10Blob_Release(blob); return hr; }
+    *code = blob;
 
     memset(&cbd, 0, sizeof cbd);
     cbd.ByteWidth = (cb_size + 15) & ~15u;
@@ -1309,16 +1311,82 @@ long d3d8_Nv2aFF_Init(void)
         { "TEXCOORD", 3, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 84, D3D11_INPUT_PER_VERTEX_DATA, 0 },
     };
 
-    hr = nv2aff_build("0", elems, 4, sizeof(Nv2aFFConstants), &g_nv2aff_vs, &g_nv2aff_layout, &g_nv2aff_cb);
+    hr = nv2aff_build("0", elems, 4, sizeof(Nv2aFFConstants), &g_nv2aff_vs, &g_nv2aff_layout, &g_nv2aff_cb,
+                      &g_nv2aff_code);
     if (FAILED(hr)) return hr;
     /* Without it texture-shader draws stay on the CPU path. */
-    if (FAILED(nv2aff_build("1", ts_elems, 8, sizeof(Nv2aTSConstants), &g_nv2ats_vs, &g_nv2ats_layout, &g_nv2ats_cb)))
+    if (FAILED(nv2aff_build("1", ts_elems, 8, sizeof(Nv2aTSConstants), &g_nv2ats_vs, &g_nv2ats_layout, &g_nv2ats_cb,
+                            &g_nv2ats_code)))
         fprintf(stderr, "nv2aff: texture-shader VS unavailable\n");
     return hr;
 }
 
+/* Raw-array layouts keyed on the element set; failures are cached as NULL. */
+#define NV2ARAW_LAYOUTS 64
+static struct { int ts; Nv2aRawElem el[8]; ID3D11InputLayout *layout; } g_nv2araw[NV2ARAW_LAYOUTS];
+static unsigned g_nv2araw_n, g_nv2araw_next;
+
+static DXGI_FORMAT nv2araw_dxgi(uint8_t f)
+{
+    switch (f) {
+    case NV2ARAW_F_R32:          return DXGI_FORMAT_R32_FLOAT;
+    case NV2ARAW_F_R32G32:       return DXGI_FORMAT_R32G32_FLOAT;
+    case NV2ARAW_F_R32G32B32:    return DXGI_FORMAT_R32G32B32_FLOAT;
+    case NV2ARAW_F_R32G32B32A32: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    case NV2ARAW_F_R8:           return DXGI_FORMAT_R8_UNORM;
+    case NV2ARAW_F_R8G8:         return DXGI_FORMAT_R8G8_UNORM;
+    case NV2ARAW_F_R8G8B8A8:     return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case NV2ARAW_F_B8G8R8A8:     return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case NV2ARAW_F_S16:          return DXGI_FORMAT_R16_SNORM;
+    case NV2ARAW_F_S16S16:       return DXGI_FORMAT_R16G16_SNORM;
+    case NV2ARAW_F_S16X4:        return DXGI_FORMAT_R16G16B16A16_SNORM;
+    default:                     return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+void *d3d8_Nv2aRaw_Layout(int ts, const Nv2aRawElem *elems, unsigned defaults_slot)
+{
+    static const char *const sem[8] = { "POSITION", "NORMAL", "COLOR", "COLOR",
+                                        "TEXCOORD", "TEXCOORD", "TEXCOORD", "TEXCOORD" };
+    static const UINT ts_idx[8] = { 0, 0, 0, 1, 0, 1, 2, 3 };
+    static const char *const ff_sem[4] = { "POSITION", "NORMAL", "COLOR", "TEXCOORD" };
+    D3D11_INPUT_ELEMENT_DESC d[8];
+    ID3DBlob *code = ts ? g_nv2ats_code : g_nv2aff_code;
+    unsigned n = ts ? 8 : 4, i, slot;
+    if (!code) return NULL;
+    for (i = 0; i < g_nv2araw_n; i++)
+        if (g_nv2araw[i].ts == ts && !memcmp(g_nv2araw[i].el, elems, n * sizeof *elems))
+            return g_nv2araw[i].layout;
+    for (i = 0; i < n; i++) {
+        d[i].SemanticName = ts ? sem[i] : ff_sem[i];
+        d[i].SemanticIndex = ts ? ts_idx[i] : 0;
+        d[i].Format = nv2araw_dxgi(elems[i].fmt);
+        d[i].InputSlot = elems[i].stream == NV2ARAW_DEFAULTS ? defaults_slot : elems[i].stream;
+        d[i].AlignedByteOffset = elems[i].offset;
+        d[i].InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+        d[i].InstanceDataStepRate = 0;
+        if (d[i].Format == DXGI_FORMAT_UNKNOWN) return NULL;
+    }
+    if (g_nv2araw_n < NV2ARAW_LAYOUTS) slot = g_nv2araw_n++;
+    else { slot = g_nv2araw_next; g_nv2araw_next = (g_nv2araw_next + 1) % NV2ARAW_LAYOUTS;
+           if (g_nv2araw[slot].layout) ID3D11InputLayout_Release(g_nv2araw[slot].layout); }
+    g_nv2araw[slot].layout = NULL;
+    if (FAILED(ID3D11Device_CreateInputLayout(d3d8_GetD3D11Device(), d, n, ID3D10Blob_GetBufferPointer(code),
+                                              ID3D10Blob_GetBufferSize(code), &g_nv2araw[slot].layout)))
+        g_nv2araw[slot].layout = NULL;
+    g_nv2araw[slot].ts = ts;
+    memset(g_nv2araw[slot].el, 0, sizeof g_nv2araw[slot].el);
+    memcpy(g_nv2araw[slot].el, elems, n * sizeof *elems);
+    return g_nv2araw[slot].layout;
+}
+
 void d3d8_Nv2aFF_Shutdown(void)
 {
+    unsigned i;
+    for (i = 0; i < g_nv2araw_n; i++) if (g_nv2araw[i].layout) ID3D11InputLayout_Release(g_nv2araw[i].layout);
+    g_nv2araw_n = g_nv2araw_next = 0;
+    if (g_nv2aff_code)   { ID3D10Blob_Release(g_nv2aff_code); g_nv2aff_code = NULL; }
+    if (g_nv2ats_code)   { ID3D10Blob_Release(g_nv2ats_code); g_nv2ats_code = NULL; }
     if (g_nv2aff_cb)     { ID3D11Buffer_Release(g_nv2aff_cb); g_nv2aff_cb = NULL; }
     if (g_nv2aff_layout) { ID3D11InputLayout_Release(g_nv2aff_layout); g_nv2aff_layout = NULL; }
     if (g_nv2aff_vs)     { ID3D11VertexShader_Release(g_nv2aff_vs); g_nv2aff_vs = NULL; }
