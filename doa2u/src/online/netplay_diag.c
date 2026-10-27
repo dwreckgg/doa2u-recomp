@@ -197,6 +197,34 @@ static void take_ctl_file(void)
     DeleteFileA(p);
 }
 
+void netplay_boot_init(void)
+{
+    char p[MAX_PATH], line[300], replay[MAX_PATH] = "";
+    unsigned seed = 0;
+    int have = 0, mirror = 0;
+    FILE *f;
+    exe_path("netplay_boot.on", p, sizeof p);
+    f = fopen(p, "r");
+    if (!f) return;
+    while (fgets(line, sizeof line, f)) {
+        char cmd[16] = "", arg[280] = "";
+        line[strcspn(line, "\r\n")] = 0;
+        if (sscanf(line, "%15s %279s", cmd, arg) < 1) continue;
+        if (!strcmp(cmd, "record")) { seed = (unsigned)strtoul(arg, NULL, 16); have = 1; }
+        else if (!strcmp(cmd, "replay")) { exe_path(arg, replay, sizeof replay); have = 2; }
+        else if (!strcmp(cmd, "mirror")) mirror = 1;
+    }
+    fclose(f);
+    DeleteFileA(p);
+    if (!have) return;
+    netplay_set_mirror(mirror);
+    if (have == 1) netplay_set_record(1);
+    if (!netplay_boot_begin(seed, have == 2 ? replay : NULL)) {
+        fprintf(stderr, "[netplay] boot session NOT started (%s)\n", have == 2 ? replay : "record");
+        fflush(stderr);
+    }
+}
+
 static int dump_at_wants_prev(void)
 {
     int i;

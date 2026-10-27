@@ -93,6 +93,8 @@ void np_game_layout_read(int port, uint8_t *layout, uint8_t *laysel)
 }
 
 void     np_game_title_redirect(int on) { fg.redirect = on; }
+int      np_game_movie_playing(void) { return fg.movie; }
+void     np_game_pad_history_clear(void) { memset(fg_mem(FG_PADS), 0, 4); }
 void     np_game_save_unlock_all(uint8_t *save) { save[26] = 1; save[27] = 7; }
 uint32_t np_game_rand_seed_va(void) { return FG_SEED; }
 void     np_game_worker_rand_seed(uint32_t seed) { fg.worker_seed = seed; }

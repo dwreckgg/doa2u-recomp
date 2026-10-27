@@ -74,6 +74,10 @@ static uint8_t  *s_scratch;           /* region bytes for hashing */
 static uint32_t  s_scratch_len;
 
 static int       s_tables_checked, s_tables_ok;
+static int       s_boot;              /* armed before the guest's entry (spec section 12) */
+static int       s_boot_armed;        /* clocks, chip and seeds in (frame 0 of a boot session) */
+static uint32_t  s_boot_quiet;        /* frame-loop ticks since a movie last played */
+#define BOOT_QUIET_FRAMES 60u
 
 /* ── tables ─────────────────────────────────────────────────────────── */
 
@@ -443,6 +447,8 @@ static void end_session(const char *why)
     }
     s_sessions++;
     s_rec_n = 0;
+    s_boot = 0;
+    s_boot_armed = 0;
     s_state = s_armed ? NP_STATE_ARMED : NP_STATE_OFF;
     if (s_provider) s_provider->end();
 }
@@ -488,6 +494,72 @@ static void begin_session(void)
                 s_active_role == NP_ROLE_JOINER ? "joiner" : "host", s_replaying ? ", replay" : "");
         fflush(stderr);
     }
+}
+
+/* ── lockstep from boot (spec section 12) ─────────────────────────────── */
+
+/* Clock bases every boot session starts from (a fixed date, 2026-01-01). The
+ * online host sends its own; a local boot session and its replays use these. */
+#define BOOT_TICK_MS   1000u
+#define BOOT_QPC       0x0000000100000000ull
+#define BOOT_FILETIME  134116992000000000ull
+
+int netplay_boot_begin(uint32_t seed, const char *replay_path)
+{
+    const np_game_desc *g = np_game();
+    if (!tables_ok()) return 0;
+    np_params_free(&s_params);
+    memset(&s_params, 0, sizeof s_params);
+    if (replay_path) {
+        FILE *f = fopen(replay_path, "rb");
+        const char *err = np_replay_read(f, &s_rp, g->save_len, sync_total(), (uint32_t)n_hash());
+        if (f) fclose(f);
+        if (err) {
+            _snprintf(s_msg, sizeof(s_msg) - 1, "Boot replay not loaded: %s", err);
+            return 0;
+        }
+        strncpy(s_req_path, replay_path, sizeof s_req_path - 1);
+        s_req_path[sizeof s_req_path - 1] = 0;
+        s_rp_loaded = 1;
+        s_replaying = 1;
+        s_active_role = s_rp.role;
+        params_copy(&s_params, &s_rp.params);
+    } else {
+        /* The image and the regions are not loaded yet: zeros, never applied. */
+        s_params.seed = seed;
+        s_params.tick_ms = BOOT_TICK_MS;
+        s_params.qpc = BOOT_QPC;
+        s_params.filetime = BOOT_FILETIME;
+        s_params.xgscnt = 0;
+        s_params.save_len = g->save_len;
+        s_params.save = (uint8_t *)calloc(g->save_len ? g->save_len : 1, 1);
+        s_params.sync_len = sync_total();
+        s_params.sync = (uint8_t *)calloc(s_params.sync_len ? s_params.sync_len : 1, 1);
+        if (!s_params.save || !s_params.sync) { np_params_free(&s_params); return 0; }
+        s_replaying = 0;
+        s_active_role = s_role;
+    }
+    s_boot = 1;
+    s_armed = 1;
+    s_div_frame = NP_NO_FRAME;
+    s_div_region = -1;
+    s_keep_all = s_record || s_replaying || online_get_diag();
+    s_rec_n = 0;
+    s_frame = 0;
+    s_tag = 0;
+    s_transitions = 0;
+    s_seed_va = 0;                                         /* found at frame 0: no guest code runs before */
+    s_boot_armed = 0;                                      /* clocks, chip and seeds go in at frame 0 */
+    s_boot_quiet = 0;
+    np_game_title_redirect(1);                             /* saves aside until the process exits */
+    np_game_session_reset();
+    s_state = NP_STATE_ACTIVE;
+    _snprintf(s_msg, sizeof(s_msg) - 1, "%s from boot", s_replaying ? "Replaying" : "Lockstep session");
+    if (online_get_diag()) {
+        fprintf(stderr, "[netplay] boot session started (%s, seed %08X)\n", s_replaying ? "replay" : "live", s_params.seed);
+        fflush(stderr);
+    }
+    return 1;
 }
 
 /* ── per frame ──────────────────────────────────────────────────────── */
@@ -574,13 +646,49 @@ void netplay_input_tick(void)
             return;
         }
         begin_session();
-    } else if (!s_armed || np_game_left_versus() || (s_replaying && s_frame >= s_rp.frames)) {
+    } else if (!s_armed || (!s_boot && np_game_left_versus()) || (s_replaying && s_frame >= s_rp.frames)) {
         record_frame(none);                                /* the state that ended the session */
         end_session(!s_armed ? "disarmed" : s_replaying && s_frame >= s_rp.frames ? "replay finished" : "left Versus");
         return;
     }
 
 frame:
+    if (s_boot && !s_boot_armed) {
+        /* The intro: local pads, host time, until the frame loop shows a screen
+         * and no movie has played for BOOT_QUIET_FRAMES (the two intro movies
+         * have a gap between them; the first frame-loop tick comes before the
+         * first movie starts). */
+        if (np_game_screen_key() == 0 || np_game_movie_playing()) { s_boot_quiet = 0; return; }
+        if (++s_boot_quiet < BOOT_QUIET_FRAMES) return;
+    }
+    if (s_boot && s_frame == 0 && !s_boot_armed) {
+        /* Frame 0 of a boot session: the first frame-loop tick with no movie on
+         * screen. The engine's movie playback stalls on frame-counted time (every
+         * boot armed before the intro movie stalled at its start, 2026-10-27),
+         * so the intro runs on host time and the session starts after it. The
+         * CRT is up, so the seed word can be found; what start-up left in the
+         * regions is captured (record, live) or put back (replay); the screen it
+         * starts on is not a transition. */
+        xbox_det_bases b;
+        s_boot_armed = 1;
+        if (s_replaying) sync_write(s_params.sync);
+        else sync_read(s_params.sync);
+        np_game_pad_history_clear();                      /* intro presses differ between machines */
+        s_seed_va = np_game_rand_seed_va();
+        if (s_seed_va) np_game_write(s_seed_va, &s_params.seed, 4);
+        np_game_worker_rand_seed(s_params.seed ^ 0x5A5A5A5Au);
+        b.tick_ms = s_params.tick_ms;
+        b.qpc = s_params.qpc;
+        b.filetime = s_params.filetime;
+        xbox_det_begin(&b);
+        mcpx_apu_det_begin(s_params.xgscnt);
+        s_last_screen = np_game_screen_key();
+        if (online_get_diag()) {
+            fprintf(stderr, "[netplay] boot session frame 0 (screen %08X, seed word %s)\n", s_last_screen,
+                    s_seed_va ? "set" : "not found");
+            fflush(stderr);
+        }
+    }
     reseed_on_transition();
     if (s_abort) {                                         /* the transition resync did not arrive */
         s_abort = 0;

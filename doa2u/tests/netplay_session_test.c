@@ -182,6 +182,78 @@ static void test_record_and_replay(void)
     remove(name);
 }
 
+/* Lockstep from boot (spec section 12): requested before the guest runs (saves
+ * go aside at once), the clocks and the chip armed at the first pad-builder
+ * call (the engine's start-up cannot run on frame-counted time: every boot
+ * stalled at the intro movie, 2026-10-27), the regions captured there and put
+ * back by a replay; leaving Versus does not end it; a recording from boot
+ * replays from boot. */
+static void test_boot_session(void)
+{
+    char name[128];
+    uint8_t before[FG_SAVE_LEN];
+    uint32_t seed;
+    np_status s;
+    int i, det0 = g_det_begin, apu0 = g_apu_begin;
+
+    fake_game_reset();
+    reset_screens();
+    memcpy(before, fg_mem(FG_SAVE), FG_SAVE_LEN);
+    netplay_set_record(1);
+    CHECK(netplay_boot_begin(0x1234u, NULL));
+    CHECK(st().state == NP_STATE_ACTIVE);
+    CHECK(g_det_begin == det0 && g_apu_begin == apu0);             /* not before the first frame */
+    CHECK(fg.redirect == 1);                                      /* saves aside from the start */
+    CHECK(netplay_session_frame() == 0);
+    memcpy(&seed, fg_mem(FG_SEED), 4);
+    CHECK(seed == 12345u);                                        /* no guest write before frame 0 */
+    fg_mem(FG_FIGHTERS)[3] = 0x5A;                                /* boot left this behind */
+    fg.screen = 0;                                                /* before the frame loop's first screen */
+    for (i = 0; i < 70; i++) tick();
+    CHECK(g_det_begin == det0);                                   /* no screen yet: not frame 0 */
+    fg.screen = 1;
+    fg.movie = 1;                                                 /* the intro: not frame 0 yet */
+    for (i = 0; i < 5; i++) { fg.host[0].buttons = 0x10; tick(); }
+    fg.movie = 0;                                                 /* the gap between two intro movies */
+    for (i = 0; i < 3; i++) tick();
+    fg.movie = 1;
+    for (i = 0; i < 5; i++) tick();
+    fg.movie = 0;
+    for (i = 0; i < 59; i++) tick();
+    CHECK(g_det_begin == det0 && netplay_session_frame() == 0);   /* 59 quiet frames: still the intro */
+    fg.host[0].buttons = 0;
+    script(0);
+    tick();                                                       /* the 60th: frame 0 */
+    CHECK(g_det_begin == det0 + 1 && g_apu_begin == apu0 + 1);     /* armed at frame 0 */
+    CHECK(fg.worker_seed != 0);
+    memcpy(&seed, fg_mem(FG_SEED), 4);
+    CHECK(seed == 0x1234u);                                       /* the seed goes in at frame 0 */
+    for (i = 1; i < 40; i++) { script(netplay_session_frame()); tick(); }
+    CHECK(st().state == NP_STATE_ACTIVE);                         /* frame 30 left Versus: no end */
+    CHECK(netplay_session_frame() == 40);
+    CHECK(!memcmp(fg_mem(FG_SAVE) + 26, before + 26, 2));         /* the image was never replaced */
+    netplay_set_armed(0, NP_ROLE_HOST);
+    tick();
+    CHECK(st().state == NP_STATE_OFF);
+    s = st();
+    CHECK(strncmp(s.message, "Recorded netplay_replay_", 24) == 0);
+    netplay_set_record(0);
+    CHECK(find_replay(name, sizeof name));
+
+    /* The same boot, replayed on a boot that left something else behind: the
+     * regions captured at frame 0 go back, and it matches to the end. */
+    fake_game_reset();
+    reset_screens();
+    fg_mem(FG_FIGHTERS)[3] = 0xC3;
+    CHECK(netplay_boot_begin(0, name));
+    for (i = 0; i < 200 && st().state == NP_STATE_ACTIVE; i++) { script(netplay_session_frame()); tick(); }   /* 60 quiet ticks, then the frames */
+    s = st();
+    CHECK(s.state == NP_STATE_OFF);
+    if (strncmp(s.message, "Replay matched", 14)) fprintf(stderr, "boot replay: %s\n", s.message);
+    CHECK(strncmp(s.message, "Replay matched the recording for all", 36) == 0);
+    remove(name);
+}
+
 static void test_ring(void)
 {
     uint32_t h[NP_MAX_REGIONS];
@@ -285,6 +357,7 @@ int main(void)
 {
     test_barrier_and_mirror();
     test_record_and_replay();
+    test_boot_session();
     test_ring();
     test_provider();
     {   /* digest logs written by the replays */

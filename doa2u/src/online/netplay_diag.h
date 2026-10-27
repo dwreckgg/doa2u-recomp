@@ -30,6 +30,10 @@ void        netplay_diag_request_dump(const char *tag);   /* written at the next
  * the session, or the frame before it (kept as a rolling copy of guest RAM
  * while such a request is pending, about 10 ms a frame). */
 void        netplay_diag_dump_at(uint32_t frame, const char *tag);
+/* Before the guest's entry point: netplay_boot.on next to the executable starts
+ * a lockstep session from boot (spec section 12). Lines: "record SEED" (hex) or
+ * "replay FILE", optionally "mirror". The file is taken (deleted) when read. */
+void        netplay_boot_init(void);
 uint32_t    netplay_diag_builder_calls(void);
 const char *netplay_diag_dump_dir(void);
 const char *netplay_diag_last_dump(void);       /* path of the latest dump, "" before one */

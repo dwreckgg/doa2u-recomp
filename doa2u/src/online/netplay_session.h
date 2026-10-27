@@ -76,6 +76,11 @@ void netplay_get_status(np_status *out);
 void netplay_set_record(int on);
 int  netplay_record(void);
 void netplay_request_replay(const char *path);   /* loaded at the next input tick */
+/* Lockstep from boot (spec section 12): called before the guest's entry point.
+ * Arms the session with fixed clock bases and `seed`, or replays `replay_path`
+ * (a recording made from boot). Frames count from the first input tick and
+ * the session lasts until disarmed or, for a replay, the recording's end. */
+int  netplay_boot_begin(uint32_t seed, const char *replay_path);
 int  netplay_list_replays(char (*names)[128], int max);
 
 /* Game hooks (recomp_manual.c, through netplay_frame_hook). */

@@ -212,6 +212,18 @@ void np_game_layout_read(int port, uint8_t *layout, uint8_t *laysel)
 
 void np_game_title_redirect(int on) { xbox_path_set_title_redirect(on); }
 
+int doa2u_movie_active(void);                /* game/movie_present.c */
+int np_game_movie_playing(void) { return doa2u_movie_active(); }
+
+/* The builder's per-pad aggregates (the "pads" region): last frame's buttons,
+ * press edges and repeat counters. The pad-forcing path clears the same block
+ * (doa2u_netplay_force_pads in recomp_manual.c). */
+void np_game_pad_history_clear(void)
+{
+    static const uint8_t zero[0x150];
+    np_game_write(0x00A94A70u, zero, sizeof zero);
+}
+
 /* The profile's game-data block sits at SAVE_VA + 0xF200 (the game's pointer
  * at 0x87CFA8 points there once a profile is loaded; Task 4 confirms that
  * MEM32(0x87CFA8) == SAVE_VA + 0xF200). Inside it: three bytes at +0x2ED2 for

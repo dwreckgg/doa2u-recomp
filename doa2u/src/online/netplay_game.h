@@ -58,6 +58,8 @@ void     np_game_layout_read(int port, uint8_t *layout, uint8_t *laysel);   /* l
  * The live image is restored when the session ends. */
 void     np_game_save_unlock_all(uint8_t *save);
 void     np_game_title_redirect(int on);  /* in a session: the game's saves go to a side folder */
+int      np_game_movie_playing(void);     /* a movie is on screen (it runs on host time) */
+void     np_game_pad_history_clear(void); /* as if no button was held last frame (press edges) */
 
 /* CRT rand(). */
 uint32_t np_game_rand_seed_va(void);      /* the game thread's seed word, 0 if not known yet */

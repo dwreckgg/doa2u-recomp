@@ -971,6 +971,7 @@ int main(int argc, char **argv)
     xbox_fiber_init();
 
     {   extern void doa2u_game_init(void); doa2u_game_init(); }
+    {   extern void netplay_boot_init(void); netplay_boot_init(); }   /* lockstep from boot, when asked */
 
     fprintf(stderr, "Init complete. Entry=0x%08X  ESP=0x%08X\n--- Calling xbe_entry_point() ---\n",
             DOA2U_ENTRY_POINT, g_esp);
