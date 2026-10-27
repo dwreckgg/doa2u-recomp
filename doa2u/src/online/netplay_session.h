@@ -85,6 +85,13 @@ int  netplay_boot_begin(uint32_t seed, const char *replay_path);
  * and its own finished check ends the movie): playback stalls on frame-counted
  * time, and an online session must not depend on host-timed decoding. */
 int  netplay_skip_movies(void);
+/* Restart-on-join, in the new process before the guest runs: a session that
+ * waits, armed, at the first frame-loop tick, calling `pump` (set first with
+ * netplay_set_boot_pump) until a provider is connected and its barrier has
+ * exchanged the start data; then frame 0. pump returns 0 to keep waiting, -1
+ * to give up (the game then runs offline, saves still aside). */
+void netplay_set_boot_pump(int (*pump)(void));
+int  netplay_boot_online(int role, int battle);
 int  netplay_list_replays(char (*names)[128], int max);
 
 /* Game hooks (recomp_manual.c, through netplay_frame_hook). */

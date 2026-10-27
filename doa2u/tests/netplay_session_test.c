@@ -300,6 +300,7 @@ static void test_provider(void)
     uint32_t len;
     int i;
 
+    s_barrier_calls = s_ends = s_ntrans = s_digests = 0;          /* earlier tests use the same provider */
     /* the host's machine: fighters pattern A, its own save image */
     fake_game_reset();
     for (i = 0; i < 16; i++) fg_mem(FG_FIGHTERS)[i] = (uint8_t)(0xA0 + i);
@@ -344,11 +345,87 @@ static void test_provider(void)
     netplay_set_provider(NULL);
 }
 
+/* Restart-on-join, the new process (spec section 12): the session is asked
+ * for before the guest runs and waits, armed, at the first frame-loop tick
+ * while the connection comes up (the pump), then runs the provider's start
+ * handshake there; the joiner takes the host's carried regions, not its own,
+ * and its own save image stays as loaded (the profile is not up yet). If the
+ * connection fails the game carries on offline with saves still aside. */
+static int s_pump_calls, s_pump_fail;
+static const np_provider *s_pump_provider;
+static int fake_pump(void)
+{
+    s_pump_calls++;
+    if (s_pump_fail) return -1;
+    if (s_pump_calls == 3) netplay_set_provider(s_pump_provider);   /* connected on the third pump */
+    return 0;
+}
+
+static void test_boot_online(void)
+{
+    static const np_provider pv = { pv_barrier, pv_exchange, pv_digest, pv_end, pv_transition };
+    uint8_t joiner_layout[NP_LAYOUT_MAX] = { 9, 8, 7, 6 };
+    const uint8_t *blob;
+    uint32_t len;
+    int i, det0, ends0;
+
+    /* the host's game at its frame 0: fighters pattern A */
+    fake_game_reset();
+    for (i = 0; i < 16; i++) fg_mem(FG_FIGHTERS)[i] = (uint8_t)(0xA0 + i);
+    CHECK(netplay_params_capture(&blob, &len, joiner_layout, 3));
+    memcpy(s_blob, blob, len);
+    s_blob_len = len;
+
+    /* the joiner's game: other fighters, its own save image */
+    fake_game_reset();
+    reset_screens();
+    for (i = 0; i < 16; i++) fg_mem(FG_FIGHTERS)[i] = (uint8_t)(0x50 + i);
+    for (i = 0; i < (int)FG_SAVE_LEN; i++) fg_mem(FG_SAVE)[i] = (uint8_t)(0x90 + i);
+    netplay_set_provider(NULL);
+    s_pump_calls = 0; s_pump_fail = 0; s_pump_provider = &pv;
+    netplay_set_boot_pump(fake_pump);
+    det0 = g_det_begin; ends0 = s_ends;
+    CHECK(netplay_boot_online(NP_ROLE_JOINER, 0));
+    CHECK(st().state == NP_STATE_ARMED);                          /* waiting, not running */
+    CHECK(netplay_skip_movies() == 1);                            /* no intro while it waits */
+    CHECK(fg.redirect == 1);
+    CHECK(g_det_begin == det0);
+
+    script(0);
+    tick();                                                       /* the first tick: waits, then frame 0 */
+    CHECK(s_pump_calls >= 3);
+    CHECK(st().state == NP_STATE_ACTIVE);
+    CHECK(netplay_session_frame() == 1);
+    CHECK(g_det_begin == det0 + 1);
+    for (i = 0; i < 16; i++) CHECK(fg_mem(FG_FIGHTERS)[i] == (uint8_t)(0xA0 + i));   /* the host's regions */
+    CHECK(fg_mem(FG_SAVE)[2] == 0x92);                            /* its own image, untouched */
+    CHECK(fg.slot[1].buttons == 0x4242);                          /* pads from the exchange */
+    fg.left = 1;
+    tick();
+    CHECK(st().state == NP_STATE_ACTIVE);                         /* leaving Versus does not end it */
+    netplay_set_armed(0, NP_ROLE_HOST);
+    tick();
+    CHECK(st().state == NP_STATE_OFF && s_ends == ends0 + 1);
+    netplay_set_provider(NULL);
+
+    /* the connection never comes: offline, saves still aside */
+    fake_game_reset();
+    reset_screens();
+    s_pump_calls = 0; s_pump_fail = 1;
+    CHECK(netplay_boot_online(NP_ROLE_JOINER, 0));
+    tick();
+    CHECK(st().state == NP_STATE_OFF);
+    CHECK(netplay_skip_movies() == 0);
+    CHECK(fg.redirect == 1);
+    netplay_set_boot_pump(NULL);
+}
+
 int main(void)
 {
     test_barrier_and_mirror();
     test_record_and_replay();
     test_boot_session();
+    test_boot_online();
     test_ring();
     test_provider();
     {   /* digest logs written by the replays */

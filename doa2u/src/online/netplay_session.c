@@ -76,6 +76,8 @@ static uint32_t  s_scratch_len;
 static int       s_tables_checked, s_tables_ok;
 static int       s_boot;              /* armed before the guest's entry (spec section 12) */
 static int       s_boot_armed;        /* clocks, chip and seeds in (frame 0 of a boot session) */
+static int       s_boot_online, s_boot_battle;   /* restart-on-join: waits for the provider at frame 0 */
+static int     (*s_boot_pump)(void);
 
 /* ── tables ─────────────────────────────────────────────────────────── */
 
@@ -447,6 +449,7 @@ static void end_session(const char *why)
     s_rec_n = 0;
     s_boot = 0;
     s_boot_armed = 0;
+    s_boot_online = 0;
     s_state = s_armed ? NP_STATE_ARMED : NP_STATE_OFF;
     if (s_provider) s_provider->end();
 }
@@ -501,6 +504,39 @@ static void begin_session(void)
 #define BOOT_TICK_MS   1000u
 #define BOOT_QPC       0x0000000100000000ull
 #define BOOT_FILETIME  134116992000000000ull
+
+int netplay_boot_online(int role, int battle)
+{
+    if (!tables_ok()) return 0;
+    np_params_free(&s_params);
+    memset(&s_params, 0, sizeof s_params);           /* the provider's handshake fills it at frame 0 */
+    s_boot = 1;
+    s_boot_online = 1;
+    s_boot_armed = 0;
+    s_boot_battle = battle ? 1 : 0;
+    s_role = role;
+    s_armed = 1;
+    s_replaying = 0;
+    s_rp_loaded = 0;
+    s_div_frame = NP_NO_FRAME;
+    s_div_region = -1;
+    s_keep_all = s_record || online_get_diag();
+    s_rec_n = 0;
+    s_frame = 0;
+    s_tag = 0;
+    s_transitions = 0;
+    s_seed_va = 0;
+    np_game_title_redirect(1);                         /* saves aside until the process exits */
+    np_game_session_reset();
+    s_state = NP_STATE_ARMED;
+    _snprintf(s_msg, sizeof(s_msg) - 1, "Waiting for the other player's game");
+    if (online_get_diag()) {
+        fprintf(stderr, "[netplay] online boot session requested (%s, %s)\n", role == NP_ROLE_JOINER ? "joiner" : "host",
+                s_boot_battle ? "Tag" : "Single");
+        fflush(stderr);
+    }
+    return 1;
+}
 
 int netplay_boot_begin(uint32_t seed, const char *replay_path)
 {
@@ -612,7 +648,29 @@ void netplay_input_tick(void)
         s_state = NP_STATE_ARMED;
     }
     if (s_state == NP_STATE_ARMED) {
-        if (!s_armed) { s_state = NP_STATE_OFF; np_replay_free(&s_rp); s_rp_loaded = 0; return; }
+        if (!s_armed) { s_state = NP_STATE_OFF; np_replay_free(&s_rp); s_rp_loaded = 0; s_boot = s_boot_online = 0; return; }
+        if (s_boot_online) {
+            /* Restart-on-join: the game holds here, at its first frame-loop
+             * tick, while the connection comes back up and the provider's
+             * handshake exchanges the start data; the pump keeps the window
+             * alive and gives up on a timeout. */
+            int r = 0;
+            for (;;) {
+                if (!s_boot_pump || s_boot_pump() < 0) { r = -1; break; }
+                if (s_provider) { r = s_provider->barrier(1, s_boot_battle); if (r != 0) break; }
+            }
+            if (r < 0) {
+                s_boot = s_boot_online = 0;
+                s_armed = 0;
+                s_state = NP_STATE_OFF;
+                _snprintf(s_msg, sizeof(s_msg) - 1, "The online session could not start; playing offline");
+                if (online_get_diag()) { fprintf(stderr, "[netplay] online boot session abandoned before frame 0\n"); fflush(stderr); }
+                return;
+            }
+            s_active_role = s_role;
+            s_state = NP_STATE_ACTIVE;
+            goto frame;
+        }
         if (s_mirror && !s_provider) {                     /* one controller drives both cursors */
             static uint32_t packet = 0x1000u;
             np_pad m, none0 = {0};
@@ -659,7 +717,7 @@ frame:
          * transition. */
         xbox_det_bases b;
         s_boot_armed = 1;
-        if (s_replaying) sync_write(s_params.sync);
+        if (s_replaying || s_boot_online) sync_write(s_params.sync);   /* a replay, or the host's (online) */
         else sync_read(s_params.sync);
         np_game_pad_history_clear();                      /* intro presses differ between machines */
         s_seed_va = np_game_rand_seed_va();
@@ -747,7 +805,8 @@ uint32_t netplay_filter_pad_mask(uint32_t host_mask)
 }
 
 uint32_t netplay_session_frame(void) { return s_frame; }
-int netplay_skip_movies(void) { return s_state == NP_STATE_ACTIVE; }
+int netplay_skip_movies(void) { return s_state == NP_STATE_ACTIVE || s_boot; }
+void netplay_set_boot_pump(int (*pump)(void)) { s_boot_pump = pump; }
 uint32_t netplay_seed_va(void) { return s_state == NP_STATE_ACTIVE ? s_seed_va : 0; }
 
 /* ── UI ─────────────────────────────────────────────────────────────── */
