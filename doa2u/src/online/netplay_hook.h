@@ -20,6 +20,7 @@ uint32_t netplay_hook_forced_pads(void);
 /* CRT rand() (sub_003352A4), every call. */
 void     netplay_hook_note_rand(void);
 int      netplay_hook_session_active(void);
+uint32_t netplay_hook_seed_va(void);
 
 #ifdef __cplusplus
 }

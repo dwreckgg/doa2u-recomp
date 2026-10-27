@@ -21,6 +21,7 @@ static char          s_dump_tag[NP_DUMP_TAG + 1];
 static char          s_last_dump[MAX_PATH];
 #define DUMP_AT_MAX 8
 #define DUMP_AT_FIGHT 0x80000000u            /* bit: relative to the first fight frame; low bits = offset + 1 (0 = f-1) */
+#define DUMP_AT_CALL  0x40000000u            /* bit: at pad-builder call N since boot, session or not ("cN") */
 static uint32_t      s_dump_at[DUMP_AT_MAX];
 static int           s_dump_at_n;
 static uint8_t      *s_prev_ram;                 /* rolling copy for "f-1" */
@@ -36,6 +37,7 @@ static uint32_t s_script_left;
 static uint32_t      s_prev_frame = NP_NO_FRAME;
 static uint32_t      s_fight_frame = NP_NO_FRAME;  /* first fight frame of the running session */
 static int           s_screens_forced;          /* ctl file: 1 on, -1 off, 0 = follow netplay_screens.on */
+static int           s_p2_neutral;              /* ctl 'p2neutral 1': the mirrored pad 1 stays connected but idle */
 static char          s_dump_at_tag[NP_DUMP_TAG + 1];
 static int           s_screens;
 
@@ -109,6 +111,8 @@ void netplay_diag_dump_at(uint32_t frame, const char *tag)
 
 static uint32_t parse_frame_spec(const char *s)
 {
+    if (*s == 'c' || *s == 'C')                       /* cN: pad-builder call N since boot */
+        return DUMP_AT_CALL | ((uint32_t)strtoul(s + 1, NULL, 10) & 0x3FFFFFFFu);
     if (*s == 'f' || *s == 'F') {                     /* f+N or f-1 */
         long n = strtol(s + 1, NULL, 10);
         if (n < -1) n = -1;
@@ -186,6 +190,7 @@ static void take_ctl_file(void)
         else if (!strcmp(cmd, "record")) netplay_set_record(atoi(arg));
         else if (!strcmp(cmd, "replay")) netplay_request_replay(arg);
         else if (!strcmp(cmd, "screens")) s_screens_forced = atoi(arg) ? 1 : -1;
+        else if (!strcmp(cmd, "p2neutral")) s_p2_neutral = atoi(arg) ? 1 : 0;
         if (online_get_diag()) { fprintf(stderr, "[netplay] ctl: %s %s %s\n", cmd, arg, arg2); fflush(stderr); }
     }
     fclose(f);
@@ -309,6 +314,18 @@ void netplay_diag_frame(void)
             dump_at_list(tag, sp ? sp + 1 : "");
         }
     }
+    if (s_dump_at_n) {                                      /* boot-call dumps ("cN") need no session */
+        int i;
+        for (i = 0; i < s_dump_at_n; i++)
+            if (s_dump_at[i] != NP_NO_FRAME && !(s_dump_at[i] & DUMP_AT_FIGHT) && (s_dump_at[i] & DUMP_AT_CALL) &&
+                (s_dump_at[i] & 0x3FFFFFFFu) == s_builder_calls) {
+                char t[NP_DUMP_TAG + 1];
+                _snprintf(t, sizeof t - 1, "%.20s_c%u", s_dump_at_tag, s_builder_calls);
+                t[NP_DUMP_TAG] = 0;
+                netplay_diag_request_dump(t);
+                s_dump_at[i] = NP_NO_FRAME;
+            }
+    }
     if (s_dump_at_n && netplay_active()) {
         int i;
         uint32_t now = netplay_session_frame();
@@ -352,6 +369,8 @@ void netplay_diag_frame(void)
         np_pad m, none0 = {0};
         int owner = np_game_pause_owner();
         np_game_pad_read(0, &m);
+        if (s_p2_neutral) memset(&m, 0, sizeof m);          /* keeps the port open, nothing pressed (no session: removing
+                                                             * the mirror would unplug pad 2 and the game stops on its prompt) */
         if (owner == 0) np_game_pad_write(1, &none0, 0x1000u + s_builder_calls);
         else if (owner == 1) { np_game_pad_write(1, &m, 0x1000u + s_builder_calls); np_game_pad_write(0, &none0, 0x1000u + s_builder_calls); }
         else np_game_pad_write(1, &m, 0x1000u + s_builder_calls);

@@ -206,7 +206,7 @@ static void record_frame(const np_pad in[2])
     for (k = 0; k < g->n_extra; k++) r->region[g->n_sync + k] = region_hash(&g->extra[k]);
     {
         uint32_t v[3] = { 0, 0, 0 };
-        if (s_seed_va && in_fight) np_game_read(s_seed_va, &v[0], 4);
+        if (s_seed_va) np_game_read(s_seed_va, &v[0], 4);   /* every frame: the menus draw from it too */
         v[1] = xbox_det_tick_ms();
         v[2] = (uint32_t)xbox_det_filetime();
         r->region[nh - 1] = np_fnv32(NP_FNV32_INIT, v, sizeof v);
@@ -483,6 +483,11 @@ static void begin_session(void)
     }
     mcpx_apu_det_begin(s_params.xgscnt);
     s_state = NP_STATE_ACTIVE;
+    if (online_get_diag()) {
+        fprintf(stderr, "[netplay] session started (%s, %s path%s)\n", s_tag ? "Tag" : "Single",
+                s_active_role == NP_ROLE_JOINER ? "joiner" : "host", s_replaying ? ", replay" : "");
+        fflush(stderr);
+    }
 }
 
 /* ── per frame ──────────────────────────────────────────────────────── */
@@ -646,6 +651,7 @@ uint32_t netplay_filter_pad_mask(uint32_t host_mask)
 }
 
 uint32_t netplay_session_frame(void) { return s_frame; }
+uint32_t netplay_seed_va(void) { return s_state == NP_STATE_ACTIVE ? s_seed_va : 0; }
 
 /* ── UI ─────────────────────────────────────────────────────────────── */
 
@@ -685,6 +691,15 @@ int netplay_list_replays(char (*names)[128], int max)
         }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
+    {   /* newest first: the names carry the time stamp, so a reverse string
+         * sort is a reverse time sort (the tab's default pick is index 0) */
+        int i, j;
+        for (i = 1; i < n; i++)
+            for (j = i; j > 0 && strcmp(names[j - 1], names[j]) < 0; j--) {
+                char t[128];
+                memcpy(t, names[j - 1], 128); memcpy(names[j - 1], names[j], 128); memcpy(names[j], t, 128);
+            }
+    }
     return n;
 }
 

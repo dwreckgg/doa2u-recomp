@@ -92,6 +92,13 @@ static void test_barrier_and_mirror(void)
     CHECK(st().state == NP_STATE_ACTIVE);
     CHECK(netplay_session_frame() == 1);                         /* frame 0 ran in the same tick */
     CHECK(g_det_begin == 1 && g_apu_begin == 1);
+    {   /* Pins (passed on first run): the game's rand() seed is set at frame 0, not only at the first screen change:
+         * the character select draws random idle animations before any transition, and a
+         * joiner or replay with its own boot's seed picked different ones (2026-10-26). */
+        uint32_t seed; memcpy(&seed, fg_mem(FG_SEED), 4);
+        CHECK(seed != 12345u);
+        CHECK(fg.worker_seed != 0);
+    }
     CHECK(fg.forced == NP_SESSION_PADS && fg.force_calls == 1);
     CHECK(fg.packet[0] == 0x1000u && fg.packet[1] == 0x1000u);   /* frame 0's packet */
     CHECK(fg.slot[1].buttons == fg.slot[0].buttons);             /* in-session mirror */

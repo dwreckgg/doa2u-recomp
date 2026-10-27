@@ -86,6 +86,7 @@ uint32_t netplay_filter_pad_mask(uint32_t host_mask); /* XGetDevices / XGetDevic
  * game has not opened yet must be reported as an insertion. */
 uint32_t netplay_forced_pads(void);
 uint32_t netplay_session_frame(void);                 /* frames since the barrier */
+uint32_t netplay_seed_va(void);                       /* the game thread's rand() seed word, 0 outside a session */
 
 /* ── Remote input provider (netplay.c) ─────────────────────────────────
  * With a provider set, an armed session is an online one. Everything is

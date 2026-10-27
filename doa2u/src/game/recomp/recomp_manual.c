@@ -864,11 +864,38 @@ uint32_t doa2u_rand_seed_va(void)
 }
 
 void sub_003352A4_gen(void);
+/* Diag: who calls rand() while a session runs (histogram of guest return
+ * addresses, printed every 600 pad-builder calls under [Online] Diag=1). */
+static struct { uint32_t ra; int fiber; uint32_t n; } s_rand_callers[48];
+static int s_rand_ncallers;
+void doa2u_rand_callers_dump(uint32_t frame)
+{
+    int i;
+    if (!s_rand_ncallers) return;
+    fprintf(stderr, "[netplay] rand callers to frame %u (site@fiber:count):", frame);
+    for (i = 0; i < s_rand_ncallers; i++) {
+        fprintf(stderr, " %08X@%d:%u", s_rand_callers[i].ra, s_rand_callers[i].fiber, s_rand_callers[i].n);
+        s_rand_callers[i].n = 0;
+    }
+    fprintf(stderr, "\n");
+    fflush(stderr);
+}
+static void rand_note_caller(void)
+{
+    extern int xbox_fiber_current(void);
+    uint32_t ra = MEM32(esp);
+    int fb = xbox_fiber_current(), i;
+    for (i = 0; i < s_rand_ncallers; i++)
+        if (s_rand_callers[i].ra == ra && s_rand_callers[i].fiber == fb) { s_rand_callers[i].n++; return; }
+    if (s_rand_ncallers < 48) { s_rand_callers[s_rand_ncallers].ra = ra; s_rand_callers[s_rand_ncallers].fiber = fb; s_rand_callers[s_rand_ncallers].n = 1; s_rand_ncallers++; }
+}
+
 void sub_003352A4(void)
 {
     extern int xbox_fiber_active(void), xbox_fiber_is_primary(void), xbox_fiber_is_coroutine(void);
     extern int xbox_fiber_current(void);
     netplay_hook_note_rand();
+    if (netplay_hook_session_active()) rand_note_caller();
     if (netplay_hook_session_active() && xbox_fiber_active() && !xbox_fiber_is_primary() &&
         !xbox_fiber_is_coroutine()) {
         int f = xbox_fiber_current();
@@ -878,6 +905,19 @@ void sub_003352A4(void)
         eax = (*w >> 16) & 0x7FFFu;
         esp += 4;                                       /* ret: cdecl, the caller's slot */
         return;
+    }
+    {   /* Game thread and its XAPI tasks in a session: one stream on the session's
+         * seed word, whatever per-thread data the CRT would pick (the character
+         * select's idle picks drew different numbers on two machines while the game
+         * thread's seed word matched every frame, 2026-10-26). Same LCG as the CRT. */
+        uint32_t sv = netplay_hook_seed_va();
+        if (sv && netplay_hook_session_active()) {
+            uint32_t s = MEM32(sv) * 214013u + 2531011u;
+            MEM32(sv) = s;
+            eax = (s >> 16) & 0x7FFFu;
+            esp += 4;
+            return;
+        }
     }
     sub_003352A4_gen();
 }

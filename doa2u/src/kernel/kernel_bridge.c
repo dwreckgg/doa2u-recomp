@@ -908,6 +908,18 @@ static void bridge_KeWaitForSingleObject(void)
          * which only the game thread's own frame hook wakes (measured
          * 2026-10-26: first local session hung at the character confirm,
          * fiber #0 WAITING on 0xDE7FB1A0). */
+        {   /* Which guest threads wait on the vblank (the CRI vsync server is
+             * the worker that does so every loop): logged once per fiber. */
+            static uint32_t s_seen[16]; static int s_nseen;
+            uint32_t c = xbox_fiber_current_ctx1(); int i;
+            for (i = 0; i < s_nseen; i++) if (s_seen[i] == c) break;
+            if (i == s_nseen && s_nseen < 16) {
+                s_seen[s_nseen++] = c;
+                fprintf(stderr, "[VBLANK] waiter fiber %d ctx1=0x%08X primary=%d coroutine=%d\n",
+                        xbox_fiber_current(), c, xbox_fiber_is_primary(), xbox_fiber_is_coroutine());
+                fflush(stderr);
+            }
+        }
         if (g_xbox_det_active && g_xbox_vsync_server_routine &&
             xbox_fiber_current_ctx1() == g_xbox_vsync_server_routine)
             xbox_fiber_block(XBOX_DET_VBLANK_KEY);

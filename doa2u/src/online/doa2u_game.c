@@ -118,9 +118,14 @@ void doa2u_rebuild_button_maps(void);        /* recomp_manual.c: guest call */
 #define SAVE_LAYOUT(p)   (0xF21Eu + 0x14u * (uint32_t)(p))
 #define SAVE_LAYSEL(p)   (0xF22Eu + 0x14u * (uint32_t)(p))
 
+/* The select flags also go 1 for the round transition inside a fight (trace
+ * 2026-10-26: key 5000006 between rounds), where the screen byte is 0; the
+ * character select always has screen byte 2 (every character-select dump,
+ * including after a Quit and after the results). */
 int np_game_at_charsel(void)
 {
-    return MEM8(GAME_MODE_VA) == GAME_MODE_VERSUS && MEM8(SEL_FLAG_VA(0)) == 1 && MEM8(SEL_FLAG_VA(1)) == 1;
+    return MEM8(GAME_MODE_VA) == GAME_MODE_VERSUS && MEM8(MENU_SCREEN_VA) == SCRST_CHARSEL &&
+           MEM8(SEL_FLAG_VA(0)) == 1 && MEM8(SEL_FLAG_VA(1)) == 1;
 }
 
 int np_game_previews_posed(void)
@@ -129,7 +134,15 @@ int np_game_previews_posed(void)
 }
 
 int      np_game_is_tag(void) { return MEM8(TAG_FLAG_VA) != 0; }
-int      np_game_in_fight(void) { return MEM8(FIGHT_FLAG_VA) == 0xFF; }
+/* The fight flag drops to 0 for the round transition (measured 2026-10-26:
+ * key 5000001 -> 5000100 -> 5000001 at every round change), so inside Versus
+ * on the no-menu screen the round byte keeps the fight going; the round byte
+ * alone is sticky after a Quit, so it never counts on a menu. */
+int np_game_in_fight(void)
+{
+    if (MEM8(GAME_MODE_VA) != GAME_MODE_VERSUS || MEM8(MENU_SCREEN_VA) != 0 || np_game_at_charsel()) return 0;
+    return MEM8(FIGHT_FLAG_VA) == 0xFF || MEM8(ROUND_VA) != 0;
+}
 int      np_game_pause_owner(void) { return MEM8(PAUSE_VA) ? (MEM8(PAUSE_OWNER_VA) & 1) : -1; }
 /* The panel byte also toggles with the round UI inside a fight (measured: a
  * flip 20 frames into round 1 and at each round change), so it only counts
@@ -137,7 +150,7 @@ int      np_game_pause_owner(void) { return MEM8(PAUSE_VA) ? (MEM8(PAUSE_OWNER_V
 uint32_t np_game_screen_key(void)
 {
     uint32_t fight = np_game_in_fight() ? 1u : 0u;
-    uint32_t sel = ((MEM8(SEL_FLAG_VA(0)) == 1) ? 2u : 0u) | ((MEM8(SEL_FLAG_VA(1)) == 1) ? 4u : 0u);
+    uint32_t sel = np_game_at_charsel() ? 2u : 0u;      /* not the raw flags: they flip between rounds */
     return ((uint32_t)MEM8(GAME_MODE_VA) << 24) | ((uint32_t)MEM8(MENU_SCREEN_VA) << 16) |
            ((!fight && MEM8(MENU_PANEL_VA)) ? 1u << 8 : 0u) | sel | fight;
 }
@@ -237,8 +250,91 @@ void np_game_save_unlock_all(uint8_t *save)
  * 0x87AD60.. held 14 and is carried in the pointer-free pieces between them;
  * 0x80ACF0.. held 4 at its head and starts after them. */
 static const np_region k_sync[] = {
+    { ROUND_VA,     0x0001u, "round" },     /* sticky after a pause-menu Quit: carried from the host so both
+                                            * machines (and a replay) start a match with the same value */
     { 0x00855C10u, 0x7D00u, "fightA" },
-    { 0x0085FE90u, 0x3200u, "fightB" },
+    /* Boot-relative counters (Task 7, 2026-10-26): two fresh launches dumped at
+     * session frame 2548 differed by the same 9 frames in every one of these
+     * (the barrier lands a few frames apart from one boot to the next), and
+     * the fight blocks built during the stage load already differed with
+     * them. Carried from the host at session start and at transitions so a
+     * joiner and a replay start from the same counts. No heap pointers:
+     * checked word by word in dumps C_2549/D_2549. */
+    { 0x006E3104u, 0x0004u, "frames_a" },  /* frames since boot, read by sub_0014C5C0.. */
+    { 0x0087D56Cu, 0x0004u, "frames_b" },  /* frames since boot, 40 readers (sub_001E33E0, sub_001F4830..) */
+    { 0x008509A0u, 0x0004u, "uitick0" },   /* per-screen frame counters, 0 on the title */
+    /* The two per-player idle records (0x8509A0 and 0x850A7C, stride 0xDC): +0 frame
+     * counter, +0xBE the idle-animation countdown, +0xC0/+0xC2 the last pick
+     * (sub_0005FE10 -> sub_0005D5E0 -> rand() when the countdown runs out). The
+     * record-vs-replay dumps one frame before the fight differed in exactly these
+     * words once the other counters were carried. The records also hold heap
+     * pointers (+0x40.., +0x98.., +0xC4), so only the counter words travel. */
+    { 0x00850A5Cu, 0x0008u, "idle0" },
+    /* The records' idle-animation slots (+0x64..+0x97: animation address in the
+     * image, progress/frame words, floats; +0xAC..+0xB7 more floats). Their
+     * "animation finished" word (+0x7C) gates the next pick, so with the slot
+     * uncarried a replay after an unrelated match (the select opened at another
+     * moment, another animation phase) picked one frame late (2026-10-26). The
+     * heap pointers at +0x98..+0xAB are left out. */
+    { 0x00850A04u, 0x0034u, "idle0_slot" },
+    { 0x00850A4Cu, 0x000Cu, "idle0_slotb" },
+    { 0x00850AE0u, 0x0034u, "idle1_slot" },
+    { 0x00850B28u, 0x000Cu, "idle1_slotb" },
+    { 0x00850A7Cu, 0x0004u, "uitick0b" },
+    { 0x00850B38u, 0x0008u, "idle1" },
+    { 0x00852FB0u, 0x0004u, "uitick1" },
+    { 0x00853020u, 0x0004u, "uitick2" },
+    { 0x00853090u, 0x0004u, "uitick3" },
+    { 0x008A7F24u, 0x0004u, "uitick4" },
+    { 0x008A7F8Cu, 0x0004u, "uitick5" },
+    /* 0x850720 is NOT carried: it is the D3D fence number (sub_003445F0 -> InsertFence), host timing by nature */
+    { 0x00850730u, 0x0004u, "tickfine2" },
+    { 0x007CA864u, 0x0004u, "timerw0" },   /* round-timer words (999 at a fight start, 240 at the 24\"0 pause) */
+    { 0x007CA9ACu, 0x0004u, "timerw1" },
+    { 0x007CA9FCu, 0x0004u, "timerw2" },
+    { 0x0087D5B4u, 0x0010u, "timer_a" },   /* sub_000652A0 */
+    { 0x0087D630u, 0x0014u, "timer_b" },   /* sub_00068328 / sub_00158BB0; +0 is another counter of the family (rec/replay 0xFE vs 0x101) */
+    { 0x0087F2B0u, 0x02F0u, "uislots" },   /* 6-word records with a counter each (sub_00069E49 / sub_0006A190) */
+    { 0x00881B94u, 0x000Cu, "misc_a" },
+    { 0x008847E4u, 0x0004u, "misc_b" },    /* sub_0009D3DB */
+    { 0x0088B0B0u, 0x0004u, "misc_c" },
+    /* The D3D device's swap counter (device 0x355500 + 0x2478, mirrored to
+     * +0x1DE4 by KickOff each frame): the game reads it through the D3D getter
+     * sub_00344180 (callers sub_00021370 / sub_000227D0 / sub_0011D250 /
+     * sub_00282DA0) as its idle timer, so the character-select idle picks, and
+     * with them the rand() stream and the intro poses, fell on different frames
+     * on two boots (rand-caller histogram 2026-10-26: sites 0005D5E5 / 00060078
+     * on the select; replays diverged at the first fight frame with the fight
+     * blocks already holding different poses one frame before). Swaps run one
+     * per game loop here, so the count advances identically once carried. */
+    { 0x003572E4u, 0x0004u, "swapcnt_a" },
+    { 0x00357978u, 0x0004u, "swapcnt_b" },
+    /* Boot-time values that never change afterwards but differ per launch
+     * (record-vs-replay dumps at fight frames 9, 10 and 300, 2026-10-26: the
+     * same words differ at all three and none changes between them): a float
+     * table (no pointers), two copies of one float, an 18-float block, a
+     * counter and a flag word. Carried so the two machines compute from the
+     * same constants; which of them the fight reads was not established. */
+    { 0x0083D37Cu, 0x4094u, "boottab" },
+    { 0x0085052Cu, 0x0004u, "bootf_a" },
+    { 0x00852F2Cu, 0x0004u, "bootf_b" },
+    { 0x00850698u, 0x0060u, "bootf_c" },
+    { 0x00850878u, 0x0004u, "cnt_a" },
+    { 0x0088F85Cu, 0x0004u, "flag_a" },
+    /* Camera smoothing state (0x87A900..0x87AD78, no pointers): nine words
+     * already differed one frame before the fight and the camera matrices
+     * (fightC1/fightD) parted on fight frame 10, then re-converged by frame
+     * 300. Carried so the intro camera starts from the same lag state. */
+    { 0x0087A900u, 0x0478u, "camlag" },
+    /* The game's own random generator: a Mersenne Twister object at 0x8A5768
+     * (624 state words + index; sub_0001FD20 seeds it, sub_0001FF40 draws, about
+     * 40 call sites through sub_000D93E0/sub_000D93F0). It is seeded at boot,
+     * so two launches draw different numbers and the camera, the hair and then
+     * the fighters parted at an arbitrary frame (10, 130, 1290 in three pairs)
+     * with equal inputs and an equal CRT rand stream. Its words look like heap
+     * pointers by chance; none is. */
+    { 0x008A5768u, 0x09C8u, "mt19937" },
+    { 0x0085FE90u, 0x3C00u, "fightB" },     /* +0xA00 (2026-10-26): 0x863090..0x863A90 drifted apart by fight frame 300 while everything else matched */
     { 0x0087AD78u, 0x008Cu, "fightC0" },
     { 0x0087AE14u, 0x004Cu, "fightC1" },
     { 0x0087AF20u, 0x1080u, "fightC2" },
@@ -257,7 +353,6 @@ static const np_region k_sync[] = {
 static const np_region k_extra[] = {
     { 0x00A94A70u, 0x0150u, "pads" },      /* per-pad aggregates the builder writes */
     { 0x00878391u, 0x0002u, "screen" },    /* menu screen byte + game mode byte */
-    { 0x008783C8u, 0x0001u, "round" },
     { 0x0087D49Du, 0x0001u, "tag" },
     { PAUSE_VA,    0x0001u, "pause" },
 };

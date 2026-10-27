@@ -47,3 +47,24 @@ ROUND_VA (0x8783C8) is sticky after a pause-menu Quit: it stays 1 on the title, 
 | FIGHT_FLAG_VA | 0x852F45 | 0xFF from the fight intro through the results, 0 otherwise | FF in all fight/pause/late-round dumps and the results; 0 on every menu and character select, including after a Quit |
 
 at_charsel = mode 5 and both SEL flags; in_fight = FIGHT flag 0xFF; screen_key low byte = fight | sel0<<1 | sel1<<2; left_versus uses these instead of the round byte.
+
+## Sync regions added in Task 7 (2026-10-26)
+
+Found by replaying recordings in fresh launches and diffing RAM dumps taken at the same session frame (`netplay_dump_at.on`, frames absolute or `f+N` from the first fight frame, `f-1` the frame before it) with `netplay_memdiff classes`. All regions are pointer-free (checked word by word across four dumps).
+
+| Region | VA / len | What it is | Evidence |
+|---|---|---|---|
+| frames_a, frames_b | 0x6E3104, 0x87D56C / 4 | frames since boot | two fresh launches at session frame 2548 differed by the same 9 in both; the idle-pick code reads 0x87D56C |
+| uitick0..5, uitick0b | 0x8509A0, 0x850A7C, 0x852FB0, 0x853020, 0x853090, 0x8A7F24, 0x8A7F8C / 4 | per-screen frame counters | same 9-frame offset |
+| idle0, idle1 | 0x850A5C, 0x850B38 / 8 | the idle-animation countdown and last pick of the two select panels (records 0x8509A0 / 0x850A7C, stride 0xDC: +0xBE countdown, +0xC0/+0xC2 pick) | record-vs-replay dumps at frame 400 differed in exactly these words; sub_0005FE10 -> sub_0005D5E0 -> rand() |
+| tickfine2, timerw0..2, timer_a, timer_b, uislots, misc_a..c | 0x850730, 0x7CA864, 0x7CA9AC, 0x7CA9FC, 0x87D5B4, 0x87D630, 0x87F2B0, 0x881B94, 0x8847E4, 0x88B0B0 | boot-relative counters and timer words | all offset by the boot difference in every pair of dumps |
+| swapcnt_a, swapcnt_b | 0x3572E4, 0x357978 / 4 | the D3D device's swap counter (device 0x355500 +0x1DE4 / +0x2478) | the game reads it through sub_00344180 as its idle timer |
+| boottab, bootf_a/b/c, cnt_a, flag_a | 0x83D37C / 0x4094, 0x85052C, 0x852F2C, 0x850698 / 0x60, 0x850878, 0x88F85C | boot-time constants | differ per launch, never change afterwards (fight frames 9, 10 and 300 identical within a run) |
+| camlag | 0x87A900 / 0x478 | camera smoothing state | nine words differed one frame before the fight; the camera matrices (fightC1/fightD) parted on fight frame 10 and re-converged by frame 300 |
+| fightB | 0x85FE90 / 0x3C00 (was 0x3200) | +0xA00: 0x863090..0x863A90 | equal at fight frame 9, 504 words changed by frame 300 and differed between recording and replay |
+| round | 0x8783C8 / 1 (moved from k_extra) | sticky after a pause-menu Quit | see the fight-flag section |
+| mt19937 | 0x8A5768 / 0x9C8 | the game's Mersenne Twister (624 state words + index; seeded by sub_0001FD20, drawn by sub_0001FF40 through sub_000D93E0/F0, ~40 call sites) | seeded at boot; three record/replay pairs with equal inputs and CRT rand parted at fight frames 10, 130 and 1290, camera first; its words look like pointers by chance (they point at zeros) |
+
+Not carried: 0x850720 (the D3D fence number, host timing), the CRI counters in 0x355xxx/0x357xxx other than the swap counter.
+
+The game-side rand() runs on the session's seed word for the primary fiber and the XAPI task fibers (recomp_manual.c): the select panels' idle picks drew different numbers on two machines while the game thread's seed word matched every frame.
