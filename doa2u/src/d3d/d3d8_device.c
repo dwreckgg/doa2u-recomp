@@ -420,31 +420,62 @@ void d3d8_ResetScissorRect(void)
     d3d8_SetScissorRect(0, 0, (int)g_device_state.width, (int)g_device_state.height);
 }
 
-/* NV097 ZPASS pixel counting (visibility tests) as a D3D11 occlusion query. */
-static ID3D11Query *g_occl_query;
-static int g_occl_active;
+/* NV097 ZPASS pixel counting (visibility tests) as D3D11 occlusion queries.
+ * Each Begin/End pair is its own query from a pool; End returns its slot and
+ * the count is fetched later (d3d8_OcclusionFetch), so the CPU never waits for
+ * the GPU to drain at the end of a test. */
+#define OCCL_SLOTS 128
+static ID3D11Query *g_occl_q[OCCL_SLOTS];
+static unsigned char g_occl_busy[OCCL_SLOTS];   /* issued, count not fetched yet */
+static int g_occl_open = -1;                     /* slot between Begin and End */
+
 void d3d8_OcclusionBegin(void)
 {
-    if (!g_device_state.d3d11_device || g_occl_active) return;
-    if (!g_occl_query) {
+    int i;
+    if (!g_device_state.d3d11_device || g_occl_open >= 0) return;
+    for (i = 0; i < OCCL_SLOTS && g_occl_busy[i]; i++) {}
+    if (i == OCCL_SLOTS) {
+        static int warned;
+        if (!warned++) fprintf(stderr, "[D3D] visibility tests: all %d queries pending; test skipped\n", OCCL_SLOTS);
+        return;
+    }
+    if (!g_occl_q[i]) {
         D3D11_QUERY_DESC qd = { D3D11_QUERY_OCCLUSION, 0 };
-        if (FAILED(ID3D11Device_CreateQuery(g_device_state.d3d11_device, &qd, &g_occl_query)))
+        if (FAILED(ID3D11Device_CreateQuery(g_device_state.d3d11_device, &qd, &g_occl_q[i])))
             return;
     }
-    ID3D11DeviceContext_Begin(g_device_state.d3d11_context, (ID3D11Asynchronous *)g_occl_query);
-    g_occl_active = 1;
+    ID3D11DeviceContext_Begin(g_device_state.d3d11_context, (ID3D11Asynchronous *)g_occl_q[i]);
+    g_occl_busy[i] = 1;
+    g_occl_open = i;
 }
 
-uint32_t d3d8_OcclusionEnd(void)
+/* Ends the open test; returns its slot, or -1 when none was open. */
+int d3d8_OcclusionEnd(void)
+{
+    const int i = g_occl_open;
+    if (i < 0) return -1;
+    g_occl_open = -1;
+    ID3D11DeviceContext_End(g_device_state.d3d11_context, (ID3D11Asynchronous *)g_occl_q[i]);
+    return i;
+}
+
+/* The count of an ended test: 1 and the count once the GPU has it (the slot is
+ * freed), 0 while it does not. block waits for it. A stale or bad slot reads
+ * as a ready zero. */
+int d3d8_OcclusionFetch(int slot, uint32_t *count, int block)
 {
     UINT64 n = 0;
-    if (!g_occl_active) return 0;
-    g_occl_active = 0;
-    ID3D11DeviceContext_End(g_device_state.d3d11_context, (ID3D11Asynchronous *)g_occl_query);
-    while (ID3D11DeviceContext_GetData(g_device_state.d3d11_context, (ID3D11Asynchronous *)g_occl_query,
-                                       &n, sizeof n, 0) == S_FALSE)
-        ;
-    return (uint32_t)n;
+    HRESULT hr;
+    *count = 0;
+    if (slot < 0 || slot >= OCCL_SLOTS || !g_occl_busy[slot] || slot == g_occl_open) return 1;
+    do {
+        hr = ID3D11DeviceContext_GetData(g_device_state.d3d11_context, (ID3D11Asynchronous *)g_occl_q[slot],
+                                         &n, sizeof n, 0);
+    } while (hr == S_FALSE && block);
+    if (hr == S_FALSE) return 0;
+    g_occl_busy[slot] = 0;
+    *count = SUCCEEDED(hr) ? (uint32_t)n : 0u;
+    return 1;
 }
 
 UINT                 d3d8_GetBackbufferHeight(void) { return g_device_state.height; }

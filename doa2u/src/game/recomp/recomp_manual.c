@@ -432,18 +432,90 @@ void sub_00335A80(void)
 static uint32_t g_pb_parsed = 0;     /* next push-buffer word not yet translated */
 static uint32_t g_pb_cb_arg[2];      /* 0x1D8C / 0x1D90: InsertCallback routine, context */
 static uint32_t g_pb_cbq[64][2], g_pb_cbq_n;
-static uint32_t g_zpass_acc;
 
-/* Visibility tests: ZPASS count via a host occlusion query, GET_REPORT writes the
- * XDK report slot {time, count, done}; NOP 6/7 queues the inserted GPU callback. */
+/* Visibility tests. Each ZPASS_PIXEL_COUNT_ENABLE on/off pair is a host
+ * occlusion query; the queries since CLEAR_REPORT_VALUE make up the value a
+ * GET_REPORT reports. The report slot {time, count, done} is written once the
+ * GPU has every count (pb_poll_reports); until then its done word stays
+ * 0xFFFFFFFF and GetVisibilityTestResult (0x344450) returns TESTINCOMPLETE and
+ * kicks the push buffer, which polls again. DOA2U reads its two stage-glare
+ * tests a frame later, so the CPU no longer waits for the GPU to drain. */
+extern void d3d8_OcclusionBegin(void);
+extern int  d3d8_OcclusionEnd(void);
+extern int  d3d8_OcclusionFetch(int slot, uint32_t *count, int block);
+#define ZPASS_MAX 16
+static int g_zpass_q[ZPASS_MAX], g_zpass_qn;      /* queries since CLEAR_REPORT_VALUE */
+static uint32_t g_zpass_acc;                      /* counts of queries that did not fit */
+typedef struct { uint32_t va; int q[ZPASS_MAX]; int qn; uint32_t acc; unsigned age; } PendingReport;
+#define REPORTS_MAX 16
+static PendingReport g_reports[REPORTS_MAX];
+static unsigned g_reports_n;
+
+static void report_write(uint32_t va, uint32_t count)
+{
+    MEM32(va) = GetTickCount(); MEM32(va + 4) = 0;
+    MEM32(va + 8) = count;
+    MEM32(va + 0xC) = 0;
+}
+
+/* Write every report whose counts have all arrived; block waits for them. */
+static void pb_poll_reports(int block)
+{
+    unsigned r = 0;
+    while (r < g_reports_n) {
+        PendingReport *p = &g_reports[r];
+        int k = 0;
+        while (k < p->qn) {
+            uint32_t c;
+            if (!d3d8_OcclusionFetch(p->q[k], &c, block)) break;
+            p->acc += c;
+            p->q[k] = p->q[--p->qn];                 /* fetched: drop it */
+        }
+        if (p->qn == 0) {
+            report_write(p->va, p->acc);
+            g_reports[r] = g_reports[--g_reports_n];
+        } else {
+            r++;
+        }
+    }
+}
+
+/* Once per frame: anything still pending after two frames is waited for, so a
+ * game that waits on a report cannot wait forever. */
+static void pb_age_reports(void)
+{
+    unsigned r;
+    int stale = 0;
+    for (r = 0; r < g_reports_n; r++) if (++g_reports[r].age >= 2) stale = 1;
+    pb_poll_reports(stale);
+}
+
+static void zpass_end(void)
+{
+    const int q = d3d8_OcclusionEnd();
+    if (q < 0) return;
+    if (g_zpass_qn < ZPASS_MAX) { g_zpass_q[g_zpass_qn++] = q; return; }
+    {   /* more tests than one report holds: count this one now */
+        uint32_t c;
+        d3d8_OcclusionFetch(q, &c, 1);
+        g_zpass_acc += c;
+    }
+}
+
+/* Visibility tests above; NOP 6/7 queues the inserted GPU callback. */
 static void pb_side_method(uint32_t method, uint32_t param)
 {
-    extern void d3d8_OcclusionBegin(void);
-    extern uint32_t d3d8_OcclusionEnd(void);
     switch (method) {
-    case 0x17C8: if (param == 1) g_zpass_acc = 0; break;            /* CLEAR_REPORT_VALUE */
+    case 0x17C8:                                                    /* CLEAR_REPORT_VALUE */
+        if (param == 1) {
+            int k;
+            for (k = 0; k < g_zpass_qn; k++) { uint32_t c; d3d8_OcclusionFetch(g_zpass_q[k], &c, 1); }
+            g_zpass_qn = 0;
+            g_zpass_acc = 0;
+        }
+        break;
     case 0x17CC:                                                    /* ZPASS_PIXEL_COUNT_ENABLE */
-        if (param) d3d8_OcclusionBegin(); else g_zpass_acc += d3d8_OcclusionEnd();
+        if (param) d3d8_OcclusionBegin(); else zpass_end();
         break;
     case 0x17D0:                                                    /* GET_REPORT */
         {   /* Host heap pages sit above the 16 MB the 24-bit offset covers: match the
@@ -454,10 +526,26 @@ static void pb_side_method(uint32_t method, uint32_t param)
                 if (pg && !((pg ^ param) & 0x00FFF000u) && MEM32(pg + (param & 0xFF0u) + 0xC) == 0xFFFFFFFFu)
                     va = pg + (param & 0xFF0u);
             }
-            if (va) {
-                MEM32(va) = GetTickCount(); MEM32(va + 4) = 0;
-                MEM32(va + 8) = g_zpass_acc;
-                MEM32(va + 0xC) = 0;
+            if (va && g_zpass_qn == 0) {
+                report_write(va, g_zpass_acc);
+            } else if (va && g_reports_n < REPORTS_MAX) {
+                /* The report owns the queries since CLEAR. The XDK brackets every
+                 * test with CLEAR ... GET_REPORT (Begin/EndVisibilityTest); a second
+                 * GET_REPORT without a CLEAR would report only the tests after the
+                 * first, where the hardware would report the running total. */
+                PendingReport *p = &g_reports[g_reports_n++];
+                p->va = va;
+                p->qn = g_zpass_qn;
+                memcpy(p->q, g_zpass_q, sizeof(int) * (size_t)g_zpass_qn);
+                p->acc = g_zpass_acc;
+                p->age = 0;
+                g_zpass_qn = 0;                         /* the report owns them now */
+                g_zpass_acc = 0;
+            } else if (va) {                            /* no room: count now */
+                int k;
+                for (k = 0; k < g_zpass_qn; k++) { uint32_t c; d3d8_OcclusionFetch(g_zpass_q[k], &c, 1); g_zpass_acc += c; }
+                g_zpass_qn = 0;
+                report_write(va, g_zpass_acc);
             }
         }
         break;
@@ -555,6 +643,7 @@ void sub_00349E80(void)   /* CDevice_KickOff(this = ecx), ret */
         perf_begin(PERF_TRANSLATE);
         pb_translate_pending(dev, cursor);
         perf_end(PERF_TRANSLATE);
+        pb_poll_reports(0);
         pb_run_callbacks();
         MEM32(dev + 0x1C20) = D3D_FAKE_CHANNEL;
         MEM32(D3D_FAKE_CHANNEL + 0x40) = cursor & 0x0FFFFFFFu;   /* DMA_PUT */
@@ -596,6 +685,7 @@ void sub_0034AF80(void)
         extern void d3d8_frame_pace(int extra_us, int force_timer);
         d3d8_frame_pace(0, 0);
     }
+    pb_age_reports();
     {
         uint32_t ret_eax = eax, ret_esp = esp;
         dev = MEM32(D3D_G_PDEVICE);
