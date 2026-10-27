@@ -199,6 +199,10 @@ static void set_banner(const char *text, DWORD ms)
     if (ms && s_banner[0] && s_banner_until && (long)(s_banner_until - now) > 0 &&
         now - s_banner_set < 4000 && strcmp(s_banner, text) != 0)
         return;
+    if (strcmp(s_banner, text) != 0 && text[0]) {   /* the log shows what the players were told */
+        fprintf(stderr, "[NETPLAY] banner: %s\n", text);
+        fflush(stderr);
+    }
     if (strcmp(s_banner, text) != 0 || !s_banner_until) s_banner_set = now;
     strncpy(s_banner, text, sizeof(s_banner) - 1);
     s_banner[sizeof(s_banner) - 1] = 0;

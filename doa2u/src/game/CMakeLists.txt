@@ -116,6 +116,7 @@ doa2u_host_test(online_settings_test ${ONLINE_DIR}/online_settings.c ${CMAKE_SOU
 doa2u_host_test(netplay_dump_test ${ONLINE_DIR}/netplay_dump.c ${CMAKE_SOURCE_DIR}/tests/netplay_dump_test.c)
 doa2u_host_test(netplay_memdiff ${ONLINE_DIR}/netplay_dump.c ${CMAKE_SOURCE_DIR}/tests/netplay_memdiff.c)
 doa2u_host_test(join_code_test ${ONLINE_DIR}/join_code.c ${CMAKE_SOURCE_DIR}/tests/join_code_test.c)
+doa2u_host_test(netplay_handoff_test ${ONLINE_DIR}/netplay_handoff.c ${CMAKE_SOURCE_DIR}/tests/netplay_handoff_test.c)
 doa2u_host_test(netplay_session_test ${ONLINE_DIR}/netplay_session.c ${ONLINE_DIR}/netplay_format.c
                 ${ONLINE_DIR}/online_settings.c ${CMAKE_SOURCE_DIR}/tests/netplay_session_test.c
                 ${CMAKE_SOURCE_DIR}/tests/fake_game.c ${CMAKE_SOURCE_DIR}/tests/netplay_stubs.c)
