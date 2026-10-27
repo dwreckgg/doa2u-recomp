@@ -74,6 +74,30 @@ int doa2u_movies_save(void)
                                       doa2u_settings_ini_path());
 }
 
+static int g_surround = -1, g_surround_boot = -1;   /* -1 = not read from the ini yet */
+
+int doa2u_surround_enabled(void)
+{
+    if (g_surround < 0)
+        g_surround = GetPrivateProfileIntA("General", "Surround", 0, doa2u_settings_ini_path()) != 0;
+    return g_surround;
+}
+
+void doa2u_surround_set_enabled(int on) { g_surround = on ? 1 : 0; }
+
+int doa2u_surround_save(void)
+{
+    /* Surround: 0 = stereo, 1 = 5.1 (applies at the next start). */
+    return WritePrivateProfileStringA("General", "Surround", doa2u_surround_enabled() ? "1" : "0",
+                                      doa2u_settings_ini_path());
+}
+
+int doa2u_surround_active(void)
+{
+    if (g_surround_boot < 0) g_surround_boot = doa2u_surround_enabled();
+    return g_surround_boot;
+}
+
 static int g_fps = -1, g_fps_corner = -1;   /* -1 = not read from the ini yet */
 
 int doa2u_fps_enabled(void)

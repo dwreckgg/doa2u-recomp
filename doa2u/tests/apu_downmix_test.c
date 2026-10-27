@@ -46,6 +46,24 @@ int main(void)
     /* Clipped to [-1, 1]. */
     mix_one(0, 3.0f, &l, &r); CHECK(NEAR(l, 1.0f));
     mix_one(1, -3.0f, &l, &r); CHECK(NEAR(r, -1.0f));
+    /* 5.1: FL FR C LFE BL BR straight through, XTLK front pair into FL/FR, back pair into BL/BR. */
+    {
+        float b6[APU_DOWNMIX_BINS] = {0}, g6[APU_DOWNMIX_BINS], out[6];
+        int c, k;
+        for (c = 0; c < APU_DOWNMIX_BINS; c++) g6[c] = 1.0f;
+        for (c = 0; c < 6; c++) {
+            for (k = 0; k < APU_DOWNMIX_BINS; k++) b6[k] = 0.0f;
+            b6[c] = 0.25f;
+            apu_surround_mix(b6, g6, 1.0f, out);
+            for (k = 0; k < 6; k++) CHECK(NEAR(out[k], k == c ? 0.25f : 0.0f));
+        }
+        for (c = 0; c < APU_DOWNMIX_BINS; c++) b6[c] = 0.0f;
+        b6[6] = 0.1f; b6[7] = 0.2f; b6[8] = 0.3f; b6[9] = 0.4f;
+        apu_surround_mix(b6, g6, 2.0f, out);
+        CHECK(NEAR(out[0], 0.2f) && NEAR(out[1], 0.4f) && NEAR(out[2], 0.0f) && NEAR(out[3], 0.0f));
+        CHECK(NEAR(out[4], 0.6f) && NEAR(out[5], 0.8f));
+        b6[0] = 5.0f; apu_surround_mix(b6, g6, 1.0f, out); CHECK(NEAR(out[0], 1.0f));
+    }
     printf("%d failures\n", failures);
     return failures ? 1 : 0;
 }

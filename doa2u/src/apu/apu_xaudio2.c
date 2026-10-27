@@ -16,11 +16,15 @@
 
 #include "apu_xaudio2.h"
 
+/* KSDATAFORMAT_SUBTYPE_PCM, defined here so no extra import library is needed. */
+static const GUID k_subtype_pcm = { 0x00000001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+
 #pragma comment(lib, "xaudio2.lib")
 #pragma comment(lib, "ole32.lib")
 
 #define XA2_SAMPLE_RATE   48000
-#define XA2_CHANNELS      2
+#define XA2_CHANNELS      2      /* the movie voice, and the APU voice in stereo */
+#define XA2_MAX_CHANNELS  6      /* the APU voice with 5.1 surround */
 #define XA2_BUF_SAMPLES   512    /* ~10.7 ms per submission */
 #define XA2_NUM_BUFS      8      /* ring of buffers, more than can be queued at once */
 #define XA2_MAX_QUEUED    4      /* ~43 ms queued at most: the APU thread waits beyond it
@@ -31,7 +35,8 @@
 static IXAudio2               *g_xa2 = NULL;
 static IXAudio2MasteringVoice *g_xa2_master = NULL;
 static IXAudio2SourceVoice    *g_xa2_source = NULL;
-static int16_t                 g_xa2_bufs[XA2_NUM_BUFS][XA2_BUF_SAMPLES][2];
+static int16_t                 g_xa2_bufs[XA2_NUM_BUFS][XA2_BUF_SAMPLES][XA2_MAX_CHANNELS];
+static int                     g_xa2_ch = XA2_CHANNELS;   /* channels of the APU voice */
 static int                     g_xa2_next_buf = 0;
 static int                     g_xa2_initialized = 0;
 static int                     g_xa2_frames_written = 0;
@@ -42,7 +47,10 @@ static int                     g_xa2_movie_next_buf = 0;
 int xa2_init(void)
 {
     HRESULT hr;
-    WAVEFORMATEX wfx = { 0 };
+    WAVEFORMATEXTENSIBLE wfx;
+    extern int doa2u_surround_active(void);
+    memset(&wfx, 0, sizeof(wfx));
+    g_xa2_ch = doa2u_surround_active() ? XA2_MAX_CHANNELS : XA2_CHANNELS;
 
     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hr) && hr != (HRESULT)0x80010106 /* RPC_E_CHANGED_MODE */ && hr != S_FALSE) {
@@ -55,22 +63,28 @@ int xa2_init(void)
     }
 
     hr = IXAudio2_CreateMasteringVoice(g_xa2, &g_xa2_master,
-        XA2_CHANNELS, XA2_SAMPLE_RATE, 0, NULL, NULL, 0);
+        (UINT32)g_xa2_ch, XA2_SAMPLE_RATE, 0, NULL, NULL, 0);
     if (FAILED(hr)) {
         IXAudio2_Release(g_xa2);
         g_xa2 = NULL;
         return 0;
     }
 
-    wfx.wFormatTag      = WAVE_FORMAT_PCM;
-    wfx.nChannels       = XA2_CHANNELS;
-    wfx.nSamplesPerSec  = XA2_SAMPLE_RATE;
-    wfx.wBitsPerSample  = 16;
-    wfx.nBlockAlign     = XA2_CHANNELS * 2;
-    wfx.nAvgBytesPerSec = XA2_SAMPLE_RATE * wfx.nBlockAlign;
+    wfx.Format.wFormatTag      = WAVE_FORMAT_EXTENSIBLE;
+    wfx.Format.nChannels       = (WORD)g_xa2_ch;
+    wfx.Format.nSamplesPerSec  = XA2_SAMPLE_RATE;
+    wfx.Format.wBitsPerSample  = 16;
+    wfx.Format.nBlockAlign     = (WORD)(g_xa2_ch * 2);
+    wfx.Format.nAvgBytesPerSec = XA2_SAMPLE_RATE * wfx.Format.nBlockAlign;
+    wfx.Format.cbSize          = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    wfx.Samples.wValidBitsPerSample = 16;
+    wfx.dwChannelMask = g_xa2_ch == 6 ? (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT | SPEAKER_FRONT_CENTER |
+                                         SPEAKER_LOW_FREQUENCY | SPEAKER_BACK_LEFT | SPEAKER_BACK_RIGHT)
+                                      : (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT);
+    wfx.SubFormat = k_subtype_pcm;
 
     hr = IXAudio2_CreateSourceVoice(g_xa2, &g_xa2_source,
-        &wfx, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL);
+        &wfx.Format, 0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, NULL, NULL);
     if (FAILED(hr)) {
         g_xa2_master->lpVtbl->DestroyVoice(g_xa2_master);
         IXAudio2_Release(g_xa2);
@@ -139,10 +153,10 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
 
     idx = g_xa2_next_buf;
     copy_samples = (num_samples > XA2_BUF_SAMPLES) ? XA2_BUF_SAMPLES : num_samples;
-    memcpy(g_xa2_bufs[idx], samples, copy_samples * XA2_CHANNELS * sizeof(int16_t));
+    memcpy(g_xa2_bufs[idx], samples, copy_samples * g_xa2_ch * sizeof(int16_t));
 
     memset(&xbuf, 0, sizeof(xbuf));
-    xbuf.AudioBytes = copy_samples * XA2_CHANNELS * sizeof(int16_t);
+    xbuf.AudioBytes = copy_samples * g_xa2_ch * sizeof(int16_t);
     xbuf.pAudioData = (const BYTE *)g_xa2_bufs[idx];
 
     IXAudio2SourceVoice_SubmitSourceBuffer(g_xa2_source, &xbuf, NULL);
@@ -151,7 +165,7 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
         static FILE *s_cap = NULL; static int s_cap_tried = 0; static unsigned s_cap_samples = 0;
         if (!s_cap_tried) { const char *cp = getenv("DOA2U_WAVCAP"); s_cap_tried = 1; if (cp) s_cap = fopen(cp, "wb"); }
         if (s_cap && s_cap_samples < 48000u * 130u) {
-            fwrite(samples, XA2_CHANNELS * sizeof(int16_t), copy_samples, s_cap); fflush(s_cap);
+            fwrite(samples, g_xa2_ch * sizeof(int16_t), copy_samples, s_cap); fflush(s_cap);
             s_cap_samples += copy_samples;
         }
     }
@@ -159,7 +173,7 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
     {   /* Output meter: is the APU mix actually carrying sound? Peak sample
          * and non-silent buffer count over each ~2 s window. */
         static DWORD s_next = 0; static unsigned s_bufs = 0, s_loud = 0, s_starved = 0; static int s_peak = 0;
-        int i, n = copy_samples * XA2_CHANNELS;
+        int i, n = copy_samples * g_xa2_ch;
         for (i = 0; i < n; i++) { int v = samples[i]; if (v < 0) v = -v; if (v > s_peak) s_peak = v; }
         s_bufs++; if (state.BuffersQueued == 0 && g_xa2_frames_written > 0) s_starved++;
         if (s_peak > 64) s_loud++;
@@ -184,6 +198,11 @@ int xa2_get_buffer_size(void)
 int xa2_max_queued(void)
 {
     return XA2_MAX_QUEUED;
+}
+
+int xa2_channels(void)
+{
+    return g_xa2_ch;
 }
 
 int xa2_movie_start(void)

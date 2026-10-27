@@ -520,6 +520,7 @@ struct MCPXAPUState {
     struct {
         McpxApuDebugMonitorPoint point;
         int16_t frame_buf[256][2];
+        int16_t frame_buf6[256][6];    /* 5.1 (FL FR C LFE BL BR) when surround is on */
         void *stream; /* SDL_AudioStream* - stubbed */
         int queued_bytes_low, queued_bytes_high;
     } monitor;

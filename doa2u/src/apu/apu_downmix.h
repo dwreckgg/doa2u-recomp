@@ -9,4 +9,9 @@
 void apu_stereo_downmix(const float bins[APU_DOWNMIX_BINS], const float gain[APU_DOWNMIX_BINS],
                         float xtlk_gain, float *left, float *right);
 
+/* 5.1 output (FL FR C LFE BL BR): bins 0-5 straight through, the crosstalk
+ * front pair (6/7) into FL/FR and back pair (8/9) into BL/BR; clipped. */
+void apu_surround_mix(const float bins[APU_DOWNMIX_BINS], const float gain[APU_DOWNMIX_BINS],
+                      float xtlk_gain, float out[6]);
+
 #endif

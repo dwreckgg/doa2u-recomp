@@ -1179,11 +1179,21 @@ static void bridge_KeSetTimer(void)
  * projection. The other indices keep the old behaviour.
  */
 extern unsigned video_xc_video_value(void);
+extern int doa2u_surround_active(void);
+/* XC_AUDIO (index 9) with 5.1 on: surround plus AC3 (0x00010002), so XGetAudioFlags
+ * and DSOUND's speaker setup take the game's own 5.1 branches. Unanswered otherwise,
+ * as before. */
+#define XC_AUDIO_SURROUND_AC3 0x00010002u
 static void bridge_ExQueryPoolBlockSize(void)
 {
     uint32_t index = STACK_ARG(0);
     if (index == 8 && STACK_ARG(2)) {
         BRIDGE_MEM32(STACK_ARG(2)) = video_xc_video_value();
+        if (STACK_ARG(1)) BRIDGE_MEM32(STACK_ARG(1)) = 4;   /* REG_DWORD */
+        if (STACK_ARG(4)) BRIDGE_MEM32(STACK_ARG(4)) = 4;
+    }
+    if (index == 9 && STACK_ARG(2) && doa2u_surround_active()) {
+        BRIDGE_MEM32(STACK_ARG(2)) = XC_AUDIO_SURROUND_AC3;
         if (STACK_ARG(1)) BRIDGE_MEM32(STACK_ARG(1)) = 4;   /* REG_DWORD */
         if (STACK_ARG(4)) BRIDGE_MEM32(STACK_ARG(4)) = 4;
     }
@@ -2661,6 +2671,7 @@ static void bridge_ExQueryNonVolatileSetting(void)
         memset(XBOX_TO_NATIVE(value), 0, n);
         if (index == 8 && len >= 4) BRIDGE_MEM32(value) = video_xc_video_value();
         if (index == 7 && len >= 4) BRIDGE_MEM32(value) = (uint32_t)profile_get_language();
+        if (index == 9 && len >= 4 && doa2u_surround_active()) BRIDGE_MEM32(value) = XC_AUDIO_SURROUND_AC3;
     }
     /* XC_FACTORY_ETHERNET_ADDR (0x101): fixed MAC. The save encryption key uses it
      * (sub_00021280); a random per-boot MAC made saves unreadable next session. */

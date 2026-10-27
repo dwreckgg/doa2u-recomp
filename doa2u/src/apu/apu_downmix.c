@@ -21,3 +21,17 @@ void apu_stereo_downmix(const float bins[APU_DOWNMIX_BINS], const float gain[APU
     *left = clip(l);
     *right = clip(r);
 }
+
+/* 5.1 (see apu_downmix.h): the bins are the speakers, so they pass straight
+ * through; the crosstalk speaker bins of 3D voices join their speaker pair. */
+void apu_surround_mix(const float bins[APU_DOWNMIX_BINS], const float gain[APU_DOWNMIX_BINS],
+                      float xtlk_gain, float out[6])
+{
+    int c;
+    for (c = 0; c < 6; c++) out[c] = bins[c] * gain[c];
+    out[0] += bins[6] * xtlk_gain;
+    out[1] += bins[7] * xtlk_gain;
+    out[4] += bins[8] * xtlk_gain;
+    out[5] += bins[9] * xtlk_gain;
+    for (c = 0; c < 6; c++) out[c] = clip(out[c]);
+}

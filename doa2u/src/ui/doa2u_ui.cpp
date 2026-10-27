@@ -420,6 +420,7 @@ void DrawGeneralSection()
     case 1:
         doa2u_log_set_enabled(0);
         doa2u_movies_set_enabled(1);
+        doa2u_surround_set_enabled(0);
         doa2u_fps_set_enabled(0);
         doa2u_fps_set_corner(FPS_TOP_LEFT);
         doa2u_perfmon_set_threshold(20);
@@ -428,7 +429,7 @@ void DrawGeneralSection()
         break;
     case 2:
         SetSaveStatus(doa2u_log_save() && doa2u_movies_save() && doa2u_fps_save() &&
-                      doa2u_perfmon_save(),
+                      doa2u_perfmon_save() && doa2u_surround_save(),
                       doa2u_settings_ini_path());
         break;
     }
@@ -442,6 +443,14 @@ void DrawGeneralSection()
     bool no_fmv = doa2u_movies_enabled() == 0;
     if (ImGui::Checkbox("Disable FMV playback", &no_fmv))
         doa2u_movies_set_enabled(no_fmv ? 0 : 1);
+
+    bool surround = doa2u_surround_enabled() != 0;
+    if (ImGui::Checkbox("5.1 surround sound", &surround))
+        doa2u_surround_set_enabled(surround ? 1 : 0);
+    if (surround != (doa2u_surround_active() != 0)) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(save, then restart the game to apply)");
+    }
 
     static const char *kCorner[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
     bool fps = doa2u_fps_enabled() != 0;

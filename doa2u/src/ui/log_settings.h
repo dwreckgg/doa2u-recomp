@@ -29,6 +29,15 @@ int  doa2u_movies_enabled(void);
 void doa2u_movies_set_enabled(int on);
 int  doa2u_movies_save(void);
 
+/* 5.1 surround sound, persisted as Surround= in [General] (default off).
+ * The game reads its speaker setup at boot and the audio device opens then,
+ * so doa2u_surround_active() is the value this run started with; a change
+ * applies at the next start. */
+int  doa2u_surround_enabled(void);
+void doa2u_surround_set_enabled(int on);
+int  doa2u_surround_save(void);
+int  doa2u_surround_active(void);
+
 /* FPS counter, persisted as FpsCounter= (0/1) and FpsCorner= in [General]. */
 enum { FPS_TOP_LEFT, FPS_TOP_RIGHT, FPS_BOTTOM_LEFT, FPS_BOTTOM_RIGHT };
 int  doa2u_fps_enabled(void);

@@ -70,6 +70,8 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
 
     float gain[APU_DOWNMIX_BINS];
     const float g_xtlk = (float)(1 << d->vp.hrtf_headroom);
+    extern int doa2u_surround_active(void);
+    const int surround = doa2u_surround_active();
     for (int b = 0; b < APU_DOWNMIX_BINS; b++) gain[b] = (float)(1 << d->vp.submix_headroom[b]);
     if (d->monitor.point != MCPX_APU_DEBUG_MON_VP) {
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
@@ -88,6 +90,11 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
             /* plus the hardware's stereo program: centre and surround at -3 dB
              * (apu_downmix.c); they were dropped, so frontal sounds lost level. */
             apu_stereo_downmix(s, gain, g_xtlk, &left, &right);
+            if (surround) {
+                float six[6];
+                apu_surround_mix(s, gain, g_xtlk, six);
+                for (int c = 0; c < 6; c++) d->monitor.frame_buf6[off + i][c] = (int16_t)(six[c] * 32767.0f);
+            }
 
             /* Convert to 16-bit and write (not accumulate) into frame buffer.
              * Each of the 8 sub-frames writes its own 32-sample slice. */

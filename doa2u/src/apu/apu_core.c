@@ -274,6 +274,51 @@ void mcpx_apu_monitor_frame(MCPXAPUState *d)
      * samples (4x oversubmission -> permanently full queue). Now the host
      * mixer voices are layered on top and 256-sample periods are staged
      * until one 1024-sample buffer is complete. */
+    if (xa2_is_active() && xa2_channels() == 6) {
+        /* 5.1: the APU's six speaker channels; the host mixer's (stereo) voices
+         * and the test tone go to the front pair. */
+        static int16_t s_stage6[1024][6];
+        static int s_fill6 = 0;
+        int buf_size = xa2_get_buffer_size();
+        if (buf_size > 1024) buf_size = 1024;
+        if (g_audio_muted) memset(d->monitor.frame_buf6, 0, sizeof(d->monitor.frame_buf6));
+        {
+            int16_t front[MIXER_FRAME_SAMPLES][2];
+            memset(front, 0, sizeof(front));
+            if (!g_audio_muted) {
+                if (g_test_tone.active)
+                    for (int i = 0; i < MIXER_FRAME_SAMPLES; i++) {
+                        front[i][0] = front[i][1] = (int16_t)(sin(g_test_tone.phase) * g_test_tone.amplitude);
+                        g_test_tone.phase += g_test_tone.phase_inc;
+                        if (g_test_tone.phase >= 2.0 * M_PI) g_test_tone.phase -= 2.0 * M_PI;
+                    }
+                mixer_render(front, MIXER_FRAME_SAMPLES);
+            }
+            for (int i = 0; i < MIXER_FRAME_SAMPLES; i++)
+                for (int c = 0; c < 2; c++) {
+                    int v = d->monitor.frame_buf6[i][c] + front[i][c];
+                    d->monitor.frame_buf6[i][c] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+                }
+        }
+        {
+            int take = MIXER_FRAME_SAMPLES;
+            if (s_fill6 + take > buf_size) take = buf_size - s_fill6;
+            memcpy(s_stage6 + s_fill6, d->monitor.frame_buf6, take * 6 * sizeof(int16_t));
+            s_fill6 += take;
+        }
+        if (s_fill6 >= buf_size) {
+            extern int xa2_queued(void);
+            extern int xa2_max_queued(void);
+            int spins = 0;
+            while (xa2_queued() >= xa2_max_queued() && spins < 200) { qemu_mutex_unlock(&d->lock); Sleep(1); qemu_mutex_lock(&d->lock); spins++; }
+            xa2_submit_samples((const int16_t *)s_stage6, buf_size);
+            s_fill6 = 0;
+        }
+        memset(d->monitor.frame_buf, 0, sizeof(d->monitor.frame_buf));
+        memset(d->monitor.frame_buf6, 0, sizeof(d->monitor.frame_buf6));
+        return;
+    }
+
     if (xa2_is_active()) {
         static int16_t s_stage[1024][2];   /* matches XA2_BUF_SAMPLES max */
         static int s_fill = 0;
