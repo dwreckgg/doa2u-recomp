@@ -24,6 +24,7 @@
 
 #include "apu_state.h"
 #include "fpconv.h"
+#include "apu_downmix.h"
 
 void mcpx_apu_dsp_init(MCPXAPUState *d)
 {
@@ -67,9 +68,9 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
 
     int off = (d->ep_frame_div % 8) * NUM_SAMPLES_PER_FRAME;
 
-    const float g_front[2] = { (float)(1 << d->vp.submix_headroom[0]),
-                               (float)(1 << d->vp.submix_headroom[1]) };
+    float gain[APU_DOWNMIX_BINS];
     const float g_xtlk = (float)(1 << d->vp.hrtf_headroom);
+    for (int b = 0; b < APU_DOWNMIX_BINS; b++) gain[b] = (float)(1 << d->vp.submix_headroom[b]);
     if (d->monitor.point != MCPX_APU_DEBUG_MON_VP) {
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
             /* Output stage: undo the headroom each voice was mixed with, as
@@ -82,12 +83,11 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
              * 1 << hrtf_headroom. The earlier fixed +18 dB on bins 0/1 alone
              * put the music 12 dB above the game's mix and buried the
              * dialogue. */
-            float left = mixbins[0][i] * g_front[0] + (mixbins[6][i] + mixbins[8][i]) * g_xtlk;
-            float right = mixbins[1][i] * g_front[1] + (mixbins[7][i] + mixbins[9][i]) * g_xtlk;
-            if (left > 1.0f) left = 1.0f;
-            if (left < -1.0f) left = -1.0f;
-            if (right > 1.0f) right = 1.0f;
-            if (right < -1.0f) right = -1.0f;
+            float s[APU_DOWNMIX_BINS], left, right;
+            for (int b = 0; b < APU_DOWNMIX_BINS; b++) s[b] = mixbins[b][i];
+            /* plus the hardware's stereo program: centre and surround at -3 dB
+             * (apu_downmix.c); they were dropped, so frontal sounds lost level. */
+            apu_stereo_downmix(s, gain, g_xtlk, &left, &right);
 
             /* Convert to 16-bit and write (not accumulate) into frame buffer.
              * Each of the 8 sub-frames writes its own 32-sample slice. */

@@ -11,6 +11,7 @@ add_library(apu_emu STATIC
     apu_dsp.c
     apu_mmio_hook.c
     apu_xaudio2.c
+    apu_downmix.c
 )
 
 target_include_directories(apu_emu PRIVATE
