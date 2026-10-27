@@ -334,11 +334,14 @@ void sub_0031BBB0(void)
         name[i] = 0;
         fprintf(stderr, "[MOVIE] mwPlyStartFname(0x%08X, \"%s\")\n", MEM32(esp + 4), name);
         fflush(stderr);
-        if (doa2u_movies_enabled()) {
+        extern int doa2u_skip_intro_enabled(void);
+        extern int doa2u_movie_is_intro(const char *guest_path);
+        if (doa2u_movies_enabled() && !(doa2u_skip_intro_enabled() && doa2u_movie_is_intro(name))) {
             doa2u_movie_select(name);
         } else {
-            /* FMV off: no presenter; the vblank pump's host-EOF trigger ends the
-             * guest movie once it reaches PLAYING, the game's own end path. */
+            /* FMV off, or an intro movie with Skip intro on: no presenter; the
+             * vblank pump's host-EOF trigger ends the guest movie once it
+             * reaches PLAYING, the game's own end path. */
             extern int g_doa2u_host_movie_ended;
             g_doa2u_host_movie_ended = 1;
         }

@@ -38,6 +38,13 @@ void doa2u_surround_set_enabled(int on);
 int  doa2u_surround_save(void);
 int  doa2u_surround_active(void);
 
+/* Skip the boot intro movies (logo and opening, which is also the title
+ * screen's idle movie) but play every other FMV; persisted as SkipIntro= in
+ * [General] (default off). "Disable FMV playback" skips every movie. */
+int  doa2u_skip_intro_enabled(void);
+void doa2u_skip_intro_set_enabled(int on);
+int  doa2u_skip_intro_save(void);
+
 /* Room reverb (the game's I3DL2 settings on the host), persisted as Reverb= in
  * [General] (default on). Takes effect immediately. */
 int  doa2u_reverb_enabled(void);

@@ -98,6 +98,24 @@ int doa2u_surround_active(void)
     return g_surround_boot;
 }
 
+static int g_skip_intro = -1;   /* -1 = not read from the ini yet */
+
+int doa2u_skip_intro_enabled(void)
+{
+    if (g_skip_intro < 0)
+        g_skip_intro = GetPrivateProfileIntA("General", "SkipIntro", 0, doa2u_settings_ini_path()) != 0;
+    return g_skip_intro;
+}
+
+void doa2u_skip_intro_set_enabled(int on) { g_skip_intro = on ? 1 : 0; }
+
+int doa2u_skip_intro_save(void)
+{
+    /* SkipIntro: 1 = skip the boot logo and opening movies. */
+    return WritePrivateProfileStringA("General", "SkipIntro", doa2u_skip_intro_enabled() ? "1" : "0",
+                                      doa2u_settings_ini_path());
+}
+
 static int g_reverb = -1;   /* -1 = not read from the ini yet */
 
 int doa2u_reverb_enabled(void)

@@ -11,4 +11,7 @@ target_include_directories(apu_resample_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_executable(apu_hrtf_tap_test apu_hrtf_tap_test.c ${CMAKE_SOURCE_DIR}/src/apu/apu_hrtf_tap.c)
 target_include_directories(apu_hrtf_tap_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-add_custom_target(host_tests DEPENDS frame_pacer_test apu_downmix_test apu_resample_test apu_hrtf_tap_test)
+add_executable(movie_names_test movie_names_test.c ${CMAKE_SOURCE_DIR}/src/game/movie_names.c)
+target_include_directories(movie_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_custom_target(host_tests DEPENDS frame_pacer_test apu_downmix_test apu_resample_test apu_hrtf_tap_test movie_names_test)

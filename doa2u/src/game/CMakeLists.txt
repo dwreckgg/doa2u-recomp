@@ -24,6 +24,7 @@ set(NV2A_SOURCES
 set(GAME_SOURCES
     main.c
     movie_present.c
+    movie_names.c            # which movies are the boot intro (Skip intro movies)
     xiso_extract.c           # first-run install of the game files from a disc image
     ${CMAKE_SOURCE_DIR}/src/ui/video_settings.c
     ${CMAKE_SOURCE_DIR}/src/ui/log_settings.c
