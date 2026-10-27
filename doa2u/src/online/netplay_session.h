@@ -122,6 +122,7 @@ typedef struct {
 int  netplay_sync_capture(const uint8_t **blob, uint32_t *len);
 int  netplay_sync_apply(const uint8_t *blob, uint32_t len);
 void netplay_set_provider(const np_provider *p);   /* NULL: local sessions only */
+int  netplay_has_provider(void);
 
 /* Start parameters as one blob (netplay_format.h). The capture buffer
  * belongs to this module until the next capture. Non-zero on success. */

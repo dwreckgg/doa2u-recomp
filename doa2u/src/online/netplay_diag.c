@@ -23,6 +23,9 @@ static char          s_last_dump[MAX_PATH];
 #define DUMP_AT_FIGHT 0x80000000u            /* bit: relative to the first fight frame; low bits = offset + 1 (0 = f-1) */
 #define DUMP_AT_CALL  0x40000000u            /* bit: at pad-builder call N since boot, session or not ("cN") */
 static uint32_t      s_dump_at[DUMP_AT_MAX];
+static int           s_dirty_on, s_dirty_file, s_dirty_phase;
+static uint8_t      *s_snap, *s_cur;
+static char          s_dirty_report[200];
 static int           s_dump_at_n;
 static uint8_t      *s_prev_ram;                 /* rolling copy for "f-1" */
 /* Scripted pad (netplay_pad.on): lines "FRAMES BUTTONS A B X Y LX LY" (BUTTONS hex,
@@ -301,6 +304,42 @@ static void copy_ram(uint8_t *dst)
     }
 }
 
+void        netplay_diag_set_dirty(int on) { s_dirty_on = on ? 1 : 0; }
+int         netplay_diag_dirty(void) { return s_dirty_on; }
+const char *netplay_diag_dirty_report(void) { return s_dirty_report; }
+
+/* Uses copy_ram above (region-wise VirtualQuery; the brief's per-page copy was
+ * superseded by it, see the ledger). */
+static void dirty_tick(void)
+{
+    static const uint32_t q = (XBOX_LOW_END - XBOX_HEAP_BASE) / 4u;
+    uint32_t bounds[8] = { 0, XBOX_IMAGE_END, XBOX_STACK_BASE, XBOX_HEAP_BASE,
+                           XBOX_HEAP_BASE + q, XBOX_HEAP_BASE + 2 * q, XBOX_HEAP_BASE + 3 * q, XBOX_LOW_END };
+    uint32_t counts[7], total;
+    if (!(s_dirty_on || s_dirty_file) || netplay_has_provider()) { s_dirty_phase = 0; return; }
+    if (!s_snap) {
+        s_snap = (uint8_t *)malloc(XBOX_LOW_END);
+        s_cur = (uint8_t *)malloc(XBOX_LOW_END);
+        if (!s_snap || !s_cur) { free(s_snap); free(s_cur); s_snap = s_cur = NULL; s_dirty_on = s_dirty_file = 0; return; }
+    }
+    if (s_dirty_phase == 0) {
+        if (s_builder_calls % 120 != 0) return;
+        copy_ram(s_snap);
+        s_dirty_phase = 1;
+        return;
+    }
+    copy_ram(s_cur);
+    s_dirty_phase = 0;
+    total = np_pages_diff(s_snap, s_cur, XBOX_LOW_END, 0, bounds, 7, counts);
+    _snprintf(s_dirty_report, sizeof s_dirty_report - 1,
+              "dirty pages in one frame: %u (image %u, runtime %u, stack %u, heap %u/%u/%u/%u)%s",
+              total, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6],
+              np_game_in_fight() ? " in a fight" : "");
+    s_dirty_report[sizeof s_dirty_report - 1] = 0;
+    fprintf(stderr, "[netplay] %s\n", s_dirty_report);
+    fflush(stderr);
+}
+
 static void rate_log(void)
 {
     static LARGE_INTEGER t0, freq;
@@ -325,6 +364,7 @@ void netplay_diag_frame(void)
     if ((s_builder_calls & 31) == 0) {                      /* request files, twice a second */
         char tag[64];
         s_mirror = exe_file_exists("netplay_mirror.on");
+        s_dirty_file = exe_file_exists("netplay_dirty.on");
         s_screens = s_screens_forced ? (s_screens_forced > 0) : exe_file_exists("netplay_screens.on");
         take_ctl_file();
         if (exe_file_exists("netplay_pad.on")) load_pad_script();
@@ -404,6 +444,7 @@ void netplay_diag_frame(void)
         else np_game_pad_write(1, &m, 0x1000u + s_builder_calls);
     }
     rate_log();
+    dirty_tick();
     if ((s_builder_calls % 600) == 0 && online_get_diag() && netplay_active()) {
         extern void doa2u_rand_callers_dump(uint32_t);
         doa2u_rand_callers_dump(netplay_session_frame());

@@ -37,6 +37,13 @@ void        netplay_boot_init(void);
 uint32_t    netplay_diag_builder_calls(void);
 const char *netplay_diag_dump_dir(void);
 const char *netplay_diag_last_dump(void);       /* path of the latest dump, "" before one */
+/* The dirty-page counter (also on while netplay_dirty.on exists): every 120
+ * pad-builder calls, guest RAM is copied at one call and compared page by
+ * page at the next, giving the 4 KB pages one frame wrote, by area. Never
+ * while an online provider is set (the copy stalls the game ~0.1 s). */
+void        netplay_diag_set_dirty(int on);
+int         netplay_diag_dirty(void);
+const char *netplay_diag_dirty_report(void);    /* the latest count, one line, "" before one */
 
 #ifdef __cplusplus
 }

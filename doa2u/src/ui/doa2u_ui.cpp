@@ -706,6 +706,9 @@ void DrawOnlineTesting()
     ImGui::SameLine();
     if (ImGui::Button("Dump")) netplay_diag_request_dump(dump_tag);
     if (netplay_diag_last_dump()[0]) ImGui::TextDisabled("Last dump: %s", netplay_diag_last_dump());
+    bool dirty = netplay_diag_dirty() != 0;
+    if (ImGui::Checkbox("Count dirty pages", &dirty)) netplay_diag_set_dirty(dirty ? 1 : 0);
+    if (netplay_diag_dirty_report()[0]) ImGui::TextDisabled("%s", netplay_diag_dirty_report());
 }
 
 void DrawOnlineSection()

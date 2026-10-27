@@ -824,6 +824,8 @@ void netplay_set_provider(const np_provider *p)
     s_provider = p;
 }
 
+int netplay_has_provider(void) { return s_provider != NULL; }
+
 uint32_t netplay_build_stamp(void) { return build_stamp(); }
 void netplay_session_set_end_note(const char *note)
 {
