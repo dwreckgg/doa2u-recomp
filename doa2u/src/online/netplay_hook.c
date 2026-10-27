@@ -2,10 +2,12 @@
 #include "netplay_hook.h"
 #include "netplay_diag.h"
 #include "netplay_session.h"
+#include "netplay.h"
 
 void netplay_frame_hook(void)
 {
     netplay_diag_frame();
+    netplay_poll();                                     /* the online lobby: one flag check offline */
     netplay_input_tick();
 }
 

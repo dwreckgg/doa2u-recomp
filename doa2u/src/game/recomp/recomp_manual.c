@@ -636,6 +636,12 @@ void sub_0034AF80(void)
         QueryPerformanceCounter(&now);
         if (!s_next.QuadPart || now.QuadPart - s_next.QuadPart > s_freq.QuadPart / 60)
             s_next = now;
+        {   /* online match: the side that runs ahead of the other waits up to
+             * 1 ms longer a frame, so it drifts back instead of stalling */
+            extern int netplay_pacing_extra_us(void);
+            int xs = netplay_pacing_extra_us();
+            if (xs) s_next.QuadPart += s_freq.QuadPart * xs / 1000000;
+        }
         while (now.QuadPart < s_next.QuadPart) {
             LONGLONG left_ms = (s_next.QuadPart - now.QuadPart) * 1000 / s_freq.QuadPart;
             if (left_ms > 2) Sleep((DWORD)(left_ms - 1));

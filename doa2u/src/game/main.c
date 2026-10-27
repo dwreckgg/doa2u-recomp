@@ -91,6 +91,10 @@ static int doa2u_init_graphics(void)
     unsigned gw, gh;
 
     video_settings_load();
+    {   /* online play: settings and winsock (no sockets until the player hosts or joins) */
+        extern void netplay_init(void);
+        netplay_init();
+    }
     video_guest_target_size(video_get_aspect(), &gw, &gh);
     if (!g_hwnd)   /* the first-run setup screen may already have made it */
         g_hwnd = doa2u_create_window();
@@ -124,8 +128,10 @@ void doa2u_pump_messages(void)
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) {
+            extern void netplay_shutdown(void);
             fprintf(stderr, "[EXIT] window closed by user\n");
             fflush(stderr);
+            netplay_shutdown();   /* tell the other player, close the router port */
             ExitProcess(0);
         }
         TranslateMessage(&msg);
@@ -843,8 +849,10 @@ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size)
 
 static void doa2u_atexit(void)
 {
+    extern void netplay_shutdown(void);
     fprintf(stderr, "[EXIT] process exiting via exit()/CRT (g_esp=0x%08X)\n", g_esp);
     fflush(stderr);
+    netplay_shutdown();   /* tell the other player, close the router port */
 }
 
 static LONG WINAPI doa2u_unhandled(PEXCEPTION_POINTERS info)
