@@ -108,6 +108,17 @@ static void test_names(void)
     CHECK(!np_handoff_name_ok("SaveData/x"));
     CHECK(!np_handoff_name_ok("userdata/x"));                       /* the folder names exactly */
     CHECK(!np_handoff_name_ok("UserData/a/b/c/d"));                 /* deeper than a profile folder */
+    /* Windows device names open the device, not a file (a COM port write can block) */
+    CHECK(!np_handoff_name_ok("UserData/CON"));
+    CHECK(!np_handoff_name_ok("UserData/nul"));
+    CHECK(!np_handoff_name_ok("UserData/COM1.dat"));
+    CHECK(!np_handoff_name_ok("UserData/lpt9"));
+    CHECK(!np_handoff_name_ok("UserData/AUX.txt"));
+    CHECK(!np_handoff_name_ok("UserData/PRN/x.dat"));
+    CHECK(!np_handoff_name_ok("UserData/CONIN$"));
+    CHECK(!np_handoff_name_ok("UserData/x."));                    /* Windows drops the trailing dot */
+    CHECK(np_handoff_name_ok("UserData/CONSOLE.dat"));             /* only the exact device names */
+    CHECK(np_handoff_name_ok("UserData/COM10"));
     {
         char longname[NP_HANDOFF_NAME_MAX + 8];
         memset(longname, 'a', sizeof longname);

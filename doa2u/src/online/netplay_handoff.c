@@ -19,6 +19,21 @@ static int comp_char_ok(char c)
            c == '.' || c == '_' || c == '-';
 }
 
+/* A Windows device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9), with or without
+ * an extension, opens the device instead of a file. */
+static int is_device_name(const char *c, size_t n)
+{
+    static const char *const k[] = { "CON", "PRN", "AUX", "NUL" };
+    char base[8];
+    size_t b = 0, i;
+    while (b < n && c[b] != '.') b++;
+    if (b < 3 || b > 4) return 0;
+    for (i = 0; i < b; i++) base[i] = (char)((c[i] >= 'a' && c[i] <= 'z') ? c[i] - 32 : c[i]);
+    base[b] = 0;
+    if (b == 3) { for (i = 0; i < 4; i++) if (!strcmp(base, k[i])) return 1; return 0; }
+    return (!strncmp(base, "COM", 3) || !strncmp(base, "LPT", 3)) && base[3] >= '1' && base[3] <= '9';
+}
+
 int np_handoff_name_ok(const char *name)
 {
     const char *p, *start;
@@ -33,6 +48,7 @@ int np_handoff_name_ok(const char *name)
             size_t n = (size_t)(p - start);
             if (n == 0) return 0;                                 /* empty component, trailing '/' */
             if ((n == 1 && start[0] == '.') || (n == 2 && start[0] == '.' && start[1] == '.')) return 0;
+            if (start[n - 1] == '.' || is_device_name(start, n)) return 0;   /* Windows aliases */
             comps++;
             if (*p == 0) break;
             start = p + 1;

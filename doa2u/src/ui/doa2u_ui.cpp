@@ -912,7 +912,14 @@ void DrawOnlineConnection()
 void DrawOnlineSection()
 {
     DrawOnlineConnection();
-    DrawOnlineTesting();
+    {   /* the local testing controls would disarm or mirror a live online session */
+        npl_status nl;
+        netplay_get(&nl);
+        bool online = nl.state != NPL_OFFLINE;
+        if (online) ImGui::BeginDisabled();
+        DrawOnlineTesting();
+        if (online) ImGui::EndDisabled();
+    }
 }
 
 void DrawMenu()

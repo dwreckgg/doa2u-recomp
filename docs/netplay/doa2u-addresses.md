@@ -64,6 +64,9 @@ Found by replaying recordings in fresh launches and diffing RAM dumps taken at t
 | fightB | 0x85FE90 / 0x3C00 (was 0x3200) | +0xA00: 0x863090..0x863A90 | equal at fight frame 9, 504 words changed by frame 300 and differed between recording and replay |
 | round | 0x8783C8 / 1 (moved from k_extra) | sticky after a pause-menu Quit | see the fight-flag section |
 | mt19937 | 0x8A5768 / 0x9C8 | the game's Mersenne Twister (624 state words + index; seeded by sub_0001FD20, drawn by sub_0001FF40 through sub_000D93E0/F0, ~40 call sites) | seeded at boot; three record/replay pairs with equal inputs and CRT rand parted at fight frames 10, 130 and 1290, camera first; its words look like pointers by chance (they point at zeros) |
+| tick1s | 0x7BFDDC / 4 | the main loop's once-a-second probe (sub_002A5530, called from sub_000FF3A0) keeps the tick of its last run here and runs again when the kernel tick is 1000 ms past it | per-boot (two-boot test); at a boot session's frame 0 it still holds a host-time tick, so the first probe after frame 0 could fire up to a second apart on two machines |
+| playtick | 0x801A18 / 4 | the tick at profile load (sub_000244F0, sub_00023D4A); play time = saved time (profile +0x2F10) + tick - playtick (sub_00023C10) | per-boot outside sessions; inside one it is set at frame 2 from the session clock, carried anyway (4 bytes) |
+| bootword | 0x3DC9FC / 4 | unknown: no absolute reference in the recompiled code (read through a pointer, or by the kernel layer) | per-boot (two-boot test: 6AE04386 vs 6AE043D2); carried because its reader is not known |
 
 Not carried: 0x850720 (the D3D fence number, host timing), the CRI counters in 0x355xxx/0x357xxx other than the swap counter.
 

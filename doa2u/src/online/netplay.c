@@ -60,7 +60,8 @@ void doa2u_pump_messages(void);       /* main.c */
 #define STUN_REFRESH_MS    15000        /* keeps the NAT mapping alive while waiting */
 #define STUN_GIVEUP_MS     4000
 
-enum { PK_HELLO = 1, PK_WELCOME, PK_PING, PK_PONG, PK_READY, PK_CHUNK, PK_ACK, PK_LEAVE, PK_BYE, PK_PUNCH, PK_DIGEST };
+enum { PK_HELLO = 1, PK_WELCOME, PK_PING, PK_PONG, PK_READY, PK_CHUNK, PK_ACK, PK_LEAVE, PK_BYE, PK_PUNCH, PK_DIGEST,
+       PK_BOOTREPLY };   /* the joiner's answer to a session (restart-on-join) */
 enum { MSG_START = 1, MSG_RESYNC = 2, MSG_BOOT = 3 };
 enum { LEAVE_LEFT = 0, LEAVE_CANCEL, LEAVE_DESYNC, LEAVE_MISMATCH, LEAVE_BADSTART };
 
@@ -72,6 +73,7 @@ typedef struct { uint32_t t; uint8_t battle; } pk_ping;      /* battle: the host
 typedef struct { uint8_t tag; } pk_ready;
 typedef struct { uint32_t id; uint8_t msg_type; uint8_t nchunks; uint8_t idx; uint8_t pad; } pk_chunk;
 typedef struct { uint32_t id; uint64_t have[4]; } pk_ack;
+typedef struct { uint32_t token; uint8_t ok; uint8_t pad[3]; } pk_bootreply;
 typedef struct { uint32_t token; uint8_t reason; } pk_leave;   /* token: the match's, from START */
 typedef struct { uint32_t frame; uint32_t n; } pk_digest;      /* + n x uint32 region hashes */
 #pragma pack(pop)
@@ -167,7 +169,13 @@ static DWORD    s_banner_until;       /* 0 = until cleared */
 static volatile LONG s_req_host, s_req_code, s_req_disconnect, s_req_boot;
 /* restart-on-join (spec section 12) */
 static np_handoff s_boot_desc;      /* host: the session it sent, kept for its own hand-off */
-static int      s_boot_sending;    /* host: MSG_BOOT in flight */
+static int      s_boot_sending;    /* host: MSG_BOOT in flight, or sent and awaiting the reply */
+static DWORD    s_boot_sent_t0;    /* host: when the session went out */
+static uint32_t s_boot_reply_token;/* joiner: the session it accepted, repeated until it restarts */
+static int      s_boot_reply_ok;
+static DWORD    s_boot_reply_last;
+static int      s_resume_failed;   /* the new process cannot run the session (files, port) */
+static int      s_relaunch_offline;/* the online session is over: start the game afresh, offline */
 static DWORD    s_boot_restart_at; /* joiner: relaunch when this passes */
 static int      s_resume;          /* this process came from a restart */
 static DWORD    s_resume_t0;
@@ -643,6 +651,7 @@ static void rx_chunk(const pk_chunk *c, const uint8_t *payload, unsigned plen)
 {
     pk_ack a;
     if (c->nchunks < 1 || c->nchunks > MAX_CHUNKS || c->idx >= c->nchunks || plen > CHUNK_BYTES) return;
+    if (c->idx < c->nchunks - 1 && plen != CHUNK_BYTES) return;   /* only the last chunk may be short */
     if (!s_rx.active || s_rx.id != c->id) {
         rx_reset();
         s_rx.data = (uint8_t *)malloc((size_t)c->nchunks * CHUNK_BYTES);
@@ -812,6 +821,10 @@ static void drop_peer(const char *why)
     gk_destroy();
     s_ncand = 0;
     s_punching = 0;
+    if (s_boot_sending) {                      /* the session never got its answer */
+        s_boot_sending = 0;
+        np_handoff_free(&s_boot_desc);
+    }
     s_state = s_is_host ? NPL_HOSTING : NPL_OFFLINE;
     s_host_t0 = GetTickCount();
     if (!s_is_host) sock_close();
@@ -852,10 +865,16 @@ static void on_connected(const struct sockaddr_in *from)
         extern const np_provider k_provider;
         netplay_set_provider(&k_provider);
     }
-    netplay_set_armed(1, s_is_host ? NP_ROLE_HOST : NP_ROLE_JOINER);
+    /* Online play is restart-on-join (spec section 12): only a resumed
+     * session (the new process) arms the core; a plain connect waits for the
+     * host's Start online session. Two running games that meet at the
+     * character select desync (measured on loopback, frame 174). */
+    if (s_resume) netplay_set_armed(1, s_is_host ? NP_ROLE_HOST : NP_ROLE_JOINER);
     set_event("Connected to %s.", s_peer_str);
     s_event[0] = 0;   /* the status line already says it */
-    set_banner("Connected! Both players: open Versus and pick the same battle type (Single or Tag).", 8000);
+    if (!s_resume)
+        set_banner(s_is_host ? "Connected! Press Start online session in the Online tab (both games restart)."
+                             : "Connected! The host starts the online session; both games then restart.", 8000);
 }
 
 static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, const uint8_t *body, unsigned blen)
@@ -968,10 +987,7 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
             int i;
             for (i = 0; i < 4; i++) s_tx.acked[i] |= a.have[i];
         }
-        if (bits_all(s_tx.acked, s_tx.nchunks)) {
-            tx_reset();
-            if (s_boot_sending) boot_host_restart();   /* the joiner has the whole session */
-        }
+        if (bits_all(s_tx.acked, s_tx.nchunks)) tx_reset();   /* the session: its reply decides (PK_BOOTREPLY) */
         break;
     }
     case PK_LEAVE: {
@@ -992,6 +1008,14 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
         }
         netplay_session_set_end_note(s_event);
         banner_for_event(6000);
+        break;
+    }
+    case PK_BOOTREPLY: {
+        pk_bootreply r;
+        extern void netplay_boot_reply(uint32_t token, int ok);
+        if (blen < sizeof(r) || !from_peer || !s_is_host) return;
+        memcpy(&r, body, sizeof(r));
+        netplay_boot_reply(r.token, r.ok);
         break;
     }
     case PK_DIGEST: {
@@ -1345,7 +1369,26 @@ static void pv_digest(uint32_t frame, uint64_t digest)
 
 static void pv_end(void)
 {
-    if (s_state == NPL_INMATCH) {
+    if (s_resume) {
+        /* The online session is over (a desync, a lost player, a disarm). This
+         * process runs on the host's profile with saves aside: start the game
+         * afresh, offline, on the player's own profile (final review I3). */
+        if (s_state == NPL_INMATCH) {
+            send_leave(s_match_token, (uint8_t)s_end_reason);
+            s_leave_repeat = 3;
+        }
+        if (!s_relaunch_offline) {
+            char t[220];
+            _snprintf(t, sizeof(t) - 1, "%s The online session is over; the game restarts on your own profile.",
+                      s_event[0] ? s_event : "");
+            t[sizeof(t) - 1] = 0;
+            set_banner(t, 0);
+            s_relaunch_offline = 1;
+            s_boot_restart_at = GetTickCount() + 5000;
+        }
+        if (s_state == NPL_INMATCH) s_state = NPL_CONNECTED;
+    }
+    if (!s_resume && s_state == NPL_INMATCH) {
         /* this side ended the match (left Versus, desync, cancel) */
         send_leave(s_match_token, (uint8_t)s_end_reason);
         s_leave_repeat = 3;
@@ -1456,8 +1499,15 @@ void netplay_poll(void)
         InterlockedExchange(&s_req_host, 0);
         if (s_state != NPL_OFFLINE) go_offline();
         if (!s_wsa) { set_event("Networking is not available (winsock failed to start)."); }
-        else if (!sock_open(port, 0)) {
-            set_event("Could not open a UDP socket.");
+        else if (!sock_open(port, s_resume)) {
+            if (s_resume && GetTickCount() - s_resume_t0 < 5000) {
+                InterlockedExchange(&s_req_host, 1);   /* the old process may still be letting go of it */
+            } else if (s_resume) {
+                set_event("UDP port %u is in use, so the other player cannot reach this game.", (unsigned)port);
+                s_resume_failed = 1;
+            } else {
+                set_event("Could not open a UDP socket.");
+            }
         } else {
             s_is_host = 1;
             s_port = port;
@@ -1516,6 +1566,19 @@ void netplay_poll(void)
         InterlockedExchange(&s_req_boot, 0);
         netplay_boot_send();
     }
+    if (s_boot_reply_token && s_have_peer && GetTickCount() - s_boot_reply_last >= 100) {
+        pk_bootreply r;
+        memset(&r, 0, sizeof r);
+        r.token = s_boot_reply_token;
+        r.ok = (uint8_t)s_boot_reply_ok;
+        send_peer(PK_BOOTREPLY, &r, sizeof r);
+        s_boot_reply_last = GetTickCount();
+    }
+    if (s_boot_sending && GetTickCount() - s_boot_sent_t0 > 15000) {
+        s_boot_sending = 0;
+        np_handoff_free(&s_boot_desc);
+        set_event("The other player's game did not answer the session. Try Start online session again.");
+    }
     if (s_boot_restart_at && (long)(GetTickCount() - s_boot_restart_at) >= 0) {
         extern void netplay_restart_now(void);
         netplay_restart_now();
@@ -1556,18 +1619,20 @@ static int handoff_path(char *out, size_t cap)
     return 1;
 }
 
+static int s_boot_files_failed;   /* a save file could not be read or carried */
+
 static void add_one_file(np_handoff *h, const char *name, const WCHAR *path)
 {
     FILE *in = _wfopen(path, L"rb");
     uint8_t *buf;
     long n;
-    if (!in) return;
+    if (!in) { s_boot_files_failed = 1; return; }
     fseek(in, 0, SEEK_END);
     n = ftell(in);
     fseek(in, 0, SEEK_SET);
     buf = (uint8_t *)malloc(n > 0 ? (size_t)n : 1);
-    if (buf && n >= 0 && fread(buf, 1, (size_t)n, in) == (size_t)n)
-        np_handoff_add_file(h, name, buf, (uint32_t)n);
+    if (!buf || n < 0 || fread(buf, 1, (size_t)n, in) != (size_t)n || !np_handoff_add_file(h, name, buf, (uint32_t)n))
+        s_boot_files_failed = 1;               /* unreadable, too large, a refused name, or the 16th+ file */
     free(buf);
     fclose(in);
 }
@@ -1661,7 +1726,7 @@ void netplay_boot_send(void)
     uint32_t n;
     LARGE_INTEGER q;
     if (!s_is_host || s_state != NPL_CONNECTED) { set_event("Connect to the other player first."); return; }
-    if (s_tx.active || s_boot_sending) return;
+    if (s_tx.active || s_boot_sending) { set_event("A session start is already in progress."); return; }
     np_handoff_free(&s_boot_desc);
     memset(&s_boot_desc, 0, sizeof s_boot_desc);
     QueryPerformanceCounter(&q);
@@ -1672,8 +1737,14 @@ void netplay_boot_send(void)
     s_boot_desc.seed = (uint32_t)(q.QuadPart >> 7) ^ ((uint32_t)rand() << 8) ^ 0x9E3779B9u;
     memcpy(s_boot_desc.joiner_layout, s_peer_layout, NP_LAYOUT_MAX);
     s_boot_desc.joiner_laysel = s_peer_laysel;
+    s_boot_files_failed = 0;
     add_save_files(&s_boot_desc, "UserData");
     add_save_files(&s_boot_desc, "TitleData");
+    if (s_boot_files_failed) {
+        np_handoff_free(&s_boot_desc);
+        set_event("A save file could not be read or is not allowed in a session (at most %u files).", (unsigned)NP_HANDOFF_MAX_FILES);
+        return;
+    }
     n = np_handoff_pack(&s_boot_desc, NULL, 0);
     buf = (uint8_t *)malloc(n ? n : 1);
     if (!buf || np_handoff_pack(&s_boot_desc, buf, n) != n || !tx_begin(MSG_BOOT, buf, n)) {
@@ -1683,6 +1754,7 @@ void netplay_boot_send(void)
     }
     free(buf);
     s_boot_sending = 1;
+    s_boot_sent_t0 = GetTickCount();
     set_event("Starting the online session (%u save files): both games restart...", (unsigned)s_boot_desc.n_files);
     set_banner("Starting the online session: both games restart.", 8000);
 }
@@ -1695,18 +1767,43 @@ static void boot_host_restart(void)
     netplay_restart_now();
 }
 
+/* host: the joiner's answer to the session it sent */
+void netplay_boot_reply(uint32_t token, int ok)
+{
+    if (!s_boot_sending || token != s_boot_desc.token) return;
+    if (ok) { boot_host_restart(); return; }
+    s_boot_sending = 0;
+    np_handoff_free(&s_boot_desc);
+    set_event("The other player's game could not take the session (see its Online tab).");
+    set_banner("The other player's game could not take the online session.", 8000);
+}
+
+static void boot_answer(uint32_t token, int ok)
+{
+    s_boot_reply_token = token ? token : 1;
+    s_boot_reply_ok = ok;
+    s_boot_reply_last = 0;                     /* the poll sends it now and every 100 ms */
+}
+
 void netplay_boot_joiner_received(const uint8_t *data, uint32_t len)
 {
     np_handoff d;
     const char *err = np_handoff_unpack(&d, data, len);
-    if (err) { set_event("The session from the host was refused (%s).", err); return; }
+    if (err) { set_event("The session from the host was refused (%s).", err); boot_answer(0, 0); return; }
     if (d.build_stamp != netplay_build_stamp()) {
+        boot_answer(d.token, 0);
         np_handoff_free(&d);
         set_event("The host runs a different build of the game; both need the same one.");
         return;
     }
     fill_own_side(&d, NP_HANDOFF_ROLE_JOINER);
-    if (!write_handoff(&d)) { np_handoff_free(&d); set_event("Could not write the session hand-off."); return; }
+    if (!write_handoff(&d)) {
+        boot_answer(d.token, 0);
+        np_handoff_free(&d);
+        set_event("Could not write the session hand-off next to the game (is its folder writable?).");
+        return;
+    }
+    boot_answer(d.token, 1);                  /* written: yes */
     np_handoff_free(&d);
     set_event("The host started the online session: restarting...");
     set_banner("Starting the online session: both games restart.", 8000);
@@ -1717,11 +1814,18 @@ void netplay_boot_joiner_received(const uint8_t *data, uint32_t len)
  * handshake is done, keeping the window alive; gives up after a minute. */
 static int boot_pump(void)
 {
-    if (GetTickCount() - s_resume_t0 > 60000) {
-        set_event("The other player's game did not come back. Playing offline.");
-        set_banner("The other player's game did not come back. Playing offline.", 8000);
+    if (s_resume_failed || GetTickCount() - s_resume_t0 > 60000) {
+        if (!s_resume_failed) set_event("The other player's game did not come back.");
+        {
+            char t[220];
+            _snprintf(t, sizeof(t) - 1, "%s The game restarts on your own profile.", s_event);
+            t[sizeof(t) - 1] = 0;
+            set_banner(t, 0);
+        }
         go_offline();
         s_resume = 0;
+        s_relaunch_offline = 1;
+        s_boot_restart_at = GetTickCount() + 5000;   /* afresh, offline (final review I3) */
         return -1;
     }
     netplay_poll();
@@ -1743,14 +1847,17 @@ static void clear_dir(const WCHAR *dir)
     do {
         if (fd.cFileName[0] == L'.') continue;
         swprintf_s(p, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { clear_dir(p); RemoveDirectoryW(p); }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {   /* a link: remove it, never its target */
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(p);
+            else DeleteFileW(p);
+        } else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { clear_dir(p); RemoveDirectoryW(p); }
         else DeleteFileW(p);
     } while (FindNextFileW(f, &fd));
     FindClose(f);
 }
 
 /* The host's files into the session folders (names were checked on unpack). */
-static void write_session_files(const np_handoff *h)
+static int write_session_files(const np_handoff *h)
 {
     extern const wchar_t *xbox_path_save_dir(void);
     WCHAR ud[MAX_PATH], td[MAX_PATH];
@@ -1759,6 +1866,12 @@ static void write_session_files(const np_handoff *h)
     swprintf_s(td, MAX_PATH, L"%s\\TitleData_netplay", xbox_path_save_dir());
     CreateDirectoryW(ud, NULL);
     CreateDirectoryW(td, NULL);
+    {
+        DWORD a1 = GetFileAttributesW(ud), a2 = GetFileAttributesW(td);
+        if (a1 == INVALID_FILE_ATTRIBUTES || a2 == INVALID_FILE_ATTRIBUTES ||
+            (a1 & FILE_ATTRIBUTE_REPARSE_POINT) || (a2 & FILE_ATTRIBUTE_REPARSE_POINT))
+            return 0;                                    /* missing, or a link: never empty its target */
+    }
     clear_dir(ud);
     clear_dir(td);
     for (i = 0; i < h->n_files; i++) {
@@ -1774,10 +1887,11 @@ static void write_session_files(const np_handoff *h)
             if (*q == L'/') { *q = 0; CreateDirectoryW(path, NULL); *q = L'\\'; }
         }
         f = _wfopen(path, L"wb");
-        if (!f) continue;
-        fwrite(h->files[i].data, 1, h->files[i].len, f);
-        fclose(f);
+        if (!f) return 0;
+        if (fwrite(h->files[i].data, 1, h->files[i].len, f) != h->files[i].len) { fclose(f); return 0; }
+        if (fclose(f) != 0) return 0;
     }
+    return 1;
 }
 
 /* main.c, before the guest's entry: a hand-off next to the executable starts
@@ -1813,7 +1927,10 @@ void netplay_resume_session(void)
         np_handoff_free(&h);
         return;
     }
-    write_session_files(&h);                             /* after the redirect's own copy */
+    if (!write_session_files(&h)) {                      /* after the redirect's own copy */
+        set_event("The host's save files could not be written into the session folder.");
+        s_resume_failed = 1;                             /* the pump gives up and relaunches */
+    }
     s_battle = h.battle;
     s_resume = 1;
     s_resume_t0 = GetTickCount();
@@ -1915,8 +2032,9 @@ void netplay_get(npl_status *out)
                   "Connected to %s (ping %.0f ms, input delay %d)", s_peer_str, out->ping_ms, out->delay);
         /* what used to flash over the game (waiting / mismatch) is read here */
         if (s_banner[0] && !s_banner_until) strncpy(out->hint, s_banner, sizeof(out->hint) - 1);
-        else _snprintf(out->hint, sizeof(out->hint) - 1, "Both players: open Versus and pick %s Battle.",
-                       s_battle ? "Tag" : "Single");
+        else _snprintf(out->hint, sizeof(out->hint) - 1, "%s",
+                       s_is_host ? "Press Start online session: both games restart, then play anything from the title on."
+                                 : "Waiting for the host to start the online session; both games then restart.");
         break;
     case NPL_INMATCH:
         _snprintf(out->status, sizeof(out->status) - 1,

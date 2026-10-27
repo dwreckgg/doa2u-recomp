@@ -295,8 +295,10 @@ static int pv_barrier(int at_barrier, int tag)
     return netplay_params_load(s_blob, s_blob_len) ? 1 : -1;
 }
 
+static int s_exchange_fail;
 static int pv_exchange(const np_pad *local, np_pad out[2])
 {
+    if (s_exchange_fail) return 0;
     out[0] = *local;
     memset(&out[1], 0, sizeof out[1]);
     out[1].buttons = 0x4242;
@@ -424,9 +426,20 @@ static void test_boot_online(void)
     fg.left = 1;
     tick();
     CHECK(st().state == NP_STATE_ACTIVE);                         /* leaving Versus does not end it */
-    netplay_set_armed(0, NP_ROLE_HOST);
-    tick();
-    CHECK(st().state == NP_STATE_OFF && s_ends == ends0 + 1);
+    {   /* the exchange fails (a desync, a lost peer): the session ends and stays
+         * ended; the character-select meeting point is not offered again
+         * (final review C1: it desyncs between different-history games) */
+        int calls0 = s_barrier_calls;
+        s_exchange_fail = 1;
+        tick();
+        CHECK(st().state == NP_STATE_OFF && s_ends == ends0 + 1);
+        CHECK(netplay_armed() == 0);
+        fg.left = 0; fg.at_charsel = 1; fg.posed = 1;
+        for (i = 0; i < 40; i++) tick();
+        CHECK(st().state == NP_STATE_OFF && s_barrier_calls == calls0);
+        s_exchange_fail = 0;
+        reset_screens();
+    }
     netplay_set_provider(NULL);
 
     /* the connection never comes: offline, saves still aside */

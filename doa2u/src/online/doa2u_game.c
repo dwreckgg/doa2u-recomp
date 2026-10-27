@@ -358,6 +358,10 @@ static const np_region k_sync[] = {
     { 0x00807778u, 0x0004u, "picks2" },
     { 0x008083C0u, 0x0008u, "picks3" },
     { 0x0080AD20u, 0x02E0u, "selidx" },    /* 16-byte records whose index byte followed the cursor */
+    /* per-boot words the two-boot test found (final review I4): */
+    { 0x007BFDDCu, 0x0004u, "tick1s" },    /* last tick of the main loop's once-a-second probe (sub_002A5530) */
+    { 0x00801A18u, 0x0004u, "playtick" },  /* tick at profile load, for play time (sub_00023C10); set in-session */
+    { 0x003DC9FCu, 0x0004u, "bootword" },  /* differs per boot, no absolute reference in the code */
 };
 static const np_region k_extra[] = {
     { 0x00A94A70u, 0x0150u, "pads" },      /* per-pad aggregates the builder writes */

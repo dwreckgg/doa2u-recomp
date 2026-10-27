@@ -448,6 +448,8 @@ static void end_session(const char *why)
     }
     s_sessions++;
     s_rec_n = 0;
+    if (s_boot_online) s_armed = 0;   /* an online boot session is not offered again: the connection
+                                       * layer relaunches the game (final review C1, I3) */
     s_boot = 0;
     s_boot_armed = 0;
     s_boot_online = 0;

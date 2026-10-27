@@ -9,7 +9,8 @@
  * written into the session folders on both machines so the two games load
  * the same profile. A file name is a path relative to the save root, under
  * "UserData/" or "TitleData/", of plain components (letters, digits, '.',
- * '_', '-'), never "..", never absolute: the joiner writes what a remote host
+ * '_', '-'), never "..", never absolute, never a Windows device name or a
+ * trailing dot: the joiner writes what a remote host
  * sent, so nothing may land outside those folders.
  *
  * No guest memory, no sockets: host-tested (tests/netplay_handoff_test.c).
