@@ -8,6 +8,7 @@ add_library(doa2u_online STATIC
     netplay_diag.c
     netplay_hook.c
     netplay_session.c
+    join_code.c
     doa2u_game.c
 )
 
