@@ -87,7 +87,7 @@ static SOCKET   s_sock = INVALID_SOCKET;
 static unsigned short s_port = DEFAULT_PORT;      /* setting */
 static unsigned short s_bound_port;               /* what the socket got */
 static struct sockaddr_in s_peer;
-static char     s_peer_str[64];
+static char     s_peer_str[64];   /* GekkoNet's key for the peer; never shown or logged */
 static int      s_have_peer;
 static DWORD    s_peer_last_rx, s_hello_sent, s_punch_sent, s_ping_sent, s_connect_t0, s_host_t0;
 static uint8_t  s_peer_layout[NP_LAYOUT_MAX], s_peer_laysel;
@@ -870,7 +870,7 @@ static void on_connected(const struct sockaddr_in *from)
      * host's Start online session. Two running games that meet at the
      * character select desync (measured on loopback, frame 174). */
     if (s_resume) netplay_set_armed(1, s_is_host ? NP_ROLE_HOST : NP_ROLE_JOINER);
-    set_event("Connected to %s.", s_peer_str);
+    set_event("Connected to the other player.");   /* never their address on screen */
     s_event[0] = 0;   /* the status line already says it */
     if (!s_resume)
         set_banner(s_is_host ? "Connected! Press Start online session in the Online tab (both games restart)."
@@ -899,14 +899,12 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
             return;
         }
         if (hl.proto != PROTO_VERSION || hl.build != netplay_build_stamp()) {
-            char who[64];
-            addr_str(from, who, sizeof(who));
             w.accept = 0;
             _snprintf(w.reason, sizeof(w.reason) - 1,
                       "Different game build (host %08X, you %08X): both need the same DOA2U.exe.",
                       w.build, hl.build);
             send_raw(from, PK_WELCOME, &w, sizeof(w));
-            set_event("Refused %s: different build (%08X, ours %08X).", who, hl.build, w.build);
+            set_event("Refused a player: different build (%08X, ours %08X).", hl.build, w.build);
             return;
         }
         if (!s_have_peer) {
@@ -1936,7 +1934,7 @@ void netplay_resume_session(void)
     s_resume_t0 = GetTickCount();
     memcpy(ep.ip, h.peer_ip, 4);
     ep.port = h.peer_port;
-    join_endpoint_text(&ep, peer);
+    join_code_make(&ep, 1, peer);                        /* a code, so no address reaches the Last code field */
     s_port = h.local_port;
     if (h.role == NP_HANDOFF_ROLE_HOST) {
         netplay_host(h.local_port);
@@ -1946,8 +1944,8 @@ void netplay_resume_session(void)
     }
     netplay_set_boot_pump(boot_pump);
     set_event("Restarted into the online session; waiting for the other player's game...");
-    fprintf(stderr, "[NETPLAY] resumed the online session as %s, peer %s, %u files\n",
-            h.role == NP_HANDOFF_ROLE_JOINER ? "joiner" : "host", peer, (unsigned)h.n_files);
+    fprintf(stderr, "[NETPLAY] resumed the online session as %s, %u files\n",
+            h.role == NP_HANDOFF_ROLE_JOINER ? "joiner" : "host", (unsigned)h.n_files);
     fflush(stderr);
     np_handoff_free(&h);
 }
@@ -1989,7 +1987,6 @@ void netplay_get(npl_status *out)
     out->is_host = s_is_host;
     out->port = s_state == NPL_OFFLINE ? s_port : s_bound_port;
     strncpy(out->event, s_event, sizeof(out->event) - 1);
-    strncpy(out->peer, s_peer_str, sizeof(out->peer) - 1);
     neps = my_endpoints(eps);
     if (neps) {
         join_code_make(eps, neps, out->my_code);
@@ -2029,7 +2026,7 @@ void netplay_get(npl_status *out)
         break;
     case NPL_CONNECTED:
         _snprintf(out->status, sizeof(out->status) - 1,
-                  "Connected to %s (ping %.0f ms, input delay %d)", s_peer_str, out->ping_ms, out->delay);
+                  "Connected (ping %.0f ms, input delay %d)", out->ping_ms, out->delay);
         /* what used to flash over the game (waiting / mismatch) is read here */
         if (s_banner[0] && !s_banner_until) strncpy(out->hint, s_banner, sizeof(out->hint) - 1);
         else _snprintf(out->hint, sizeof(out->hint) - 1, "%s",

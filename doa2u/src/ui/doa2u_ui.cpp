@@ -787,6 +787,45 @@ bool NetplayBannerPending()
     return netplay_banner(b, sizeof(b)) != 0;
 }
 
+/* Ping and input delay over the game while connected (F9, or the Online
+ * tab's checkbox). Top-right, below the FPS counter when that sits there. */
+void DrawNetStats()
+{
+    npl_status nl;
+    char line[2][64];
+    if (!online_get_show_stats()) return;
+    netplay_get(&nl);
+    if (nl.state != NPL_CONNECTED && nl.state != NPL_INMATCH) return;
+    if (nl.ping_ms > 0.0f) _snprintf_s(line[0], sizeof(line[0]), _TRUNCATE, "Ping %.0f ms", nl.ping_ms);
+    else _snprintf_s(line[0], sizeof(line[0]), _TRUNCATE, "Ping --");
+    _snprintf_s(line[1], sizeof(line[1]), _TRUNCATE, "Delay %d frame%s (%.0f ms)",
+                nl.delay, nl.delay == 1 ? "" : "s", nl.delay * 1000.0f / 60.0f);
+
+    const ImGuiViewport *vp = ImGui::GetMainViewport();
+    ImFont *font = g_fps_font ? g_fps_font : ImGui::GetFont();
+    float size = vp->WorkSize.y * 0.026f;
+    if (size < 16.0f) size = 16.0f;
+    float pad = size * 0.6f;
+    float y = vp->WorkPos.y + pad;
+    if (doa2u_fps_enabled() && doa2u_fps_corner() == FPS_TOP_RIGHT) {
+        float fps_size = vp->WorkSize.y * 0.045f;
+        if (fps_size < 24.0f) fps_size = 24.0f;
+        y += fps_size * 1.4f + fps_size * 0.4f;
+    }
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    const ImU32 outline = IM_COL32(0, 0, 0, 255);
+    float o = size / 14.0f;
+    for (int i = 0; i < 2; ++i) {
+        ImVec2 ts = font->CalcTextSizeA(size, FLT_MAX, 0.0f, line[i]);
+        ImVec2 pos(vp->WorkPos.x + vp->WorkSize.x - pad - ts.x, y);
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                if (dx || dy) dl->AddText(font, size, ImVec2(pos.x + dx * o, pos.y + dy * o), outline, line[i]);
+        dl->AddText(font, size, pos, IM_COL32(255, 255, 255, 255), line[i]);
+        y += ts.y;
+    }
+}
+
 void DrawNetplayBanner()
 {
     char text[200];
@@ -906,6 +945,11 @@ void DrawOnlineConnection()
     if (nl.state == NPL_INMATCH)
         ImGui::Text("%s Battle online, %.1f frames ahead of the other side",
                     nl.match_tag ? "Tag" : "Single", nl.frames_ahead);
+    {
+        bool stats = online_get_show_stats() != 0;
+        if (ImGui::Checkbox("Show ping and input delay over the game (F9)", &stats))
+            online_set_show_stats(stats ? 1 : 0);
+    }
     ImGui::Separator();
 }
 
@@ -1063,6 +1107,13 @@ extern "C" int doa2u_ui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 1;
     }
 
+    /* F9: the ping / input delay box (online play), unless a row is
+     * listening for a key to bind. */
+    if (msg == WM_KEYDOWN && wp == VK_F9 && !(lp & (1 << 30)) && !(g_visible && g_listening >= 0)) {
+        online_set_show_stats(!online_get_show_stats());
+        return 1;
+    }
+
     /* No cursor over the game while the overlay is closed. */
     if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT && !g_visible) {
         SetCursor(NULL);
@@ -1118,6 +1169,7 @@ extern "C" void doa2u_ui_render(void)
     ImGui::NewFrame();
 
     if (doa2u_fps_enabled()) DrawFpsCounter();
+    DrawNetStats();
     DrawNetplayBanner();
     if (g_visible) DrawMenu();
 

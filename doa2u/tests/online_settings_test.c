@@ -48,6 +48,19 @@ int main(void)
     CHECK(online_get_port() == 7004 && online_get_delay_auto() == 0 && online_get_delay() == 5);
     CHECK(strcmp(online_get_last_join(), "ywBxBz") == 0 && online_get_diag() == 1);
 
+    /* the connection stats box (F9): off by default, and a toggle is written
+     * at once, alone, so it lasts without pressing Save */
+    CHECK(online_get_show_stats() == 0);
+    online_set_port(7009);                                   /* an unsaved edit */
+    online_set_show_stats(1);
+    GetPrivateProfileStringA("Online", "ShowStats", "", buf, sizeof buf, path); CHECK(strcmp(buf, "1") == 0);
+    GetPrivateProfileStringA("Online", "Port", "", buf, sizeof buf, path);      CHECK(strcmp(buf, "7004") == 0);
+    online_set_show_stats(0);
+    CHECK(online_settings_load() == 1 && online_get_show_stats() == 0);
+    online_set_show_stats(1);
+    CHECK(online_settings_load() == 1 && online_get_show_stats() == 1);
+    online_set_show_stats(0);
+
     /* a hand-edited ini out of range reads as the defaults */
     WritePrivateProfileStringA("Online", "Port", "8000", path);
     WritePrivateProfileStringA("Online", "Delay", "12", path);

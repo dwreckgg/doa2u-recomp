@@ -12,6 +12,7 @@ static int  g_delay_auto = 1;
 static int  g_delay = ONLINE_DELAY_DEFAULT;
 static char g_last_join[ONLINE_LAST_JOIN_MAX];
 static int  g_diag = 0;
+static int  g_show_stats = 0;
 static int  g_loaded = 0;
 static char g_test_path[MAX_PATH];
 
@@ -51,6 +52,7 @@ int online_settings_load(void)
     g_delay = clamp_delay((int)GetPrivateProfileIntA("Online", "Delay", ONLINE_DELAY_DEFAULT, p));
     GetPrivateProfileStringA("Online", "LastJoin", "", g_last_join, sizeof(g_last_join), p);
     g_diag = GetPrivateProfileIntA("Online", "Diag", 0, p) ? 1 : 0;
+    g_show_stats = GetPrivateProfileIntA("Online", "ShowStats", 0, p) ? 1 : 0;
     g_loaded = 1;
     return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES;
 }
@@ -93,4 +95,12 @@ void online_set_last_join(const char *code)
 }
 
 int online_get_diag(void) { ensure(); return g_diag; }
+int online_get_show_stats(void) { ensure(); return g_show_stats; }
+
+void online_set_show_stats(int on)
+{
+    ensure();
+    g_show_stats = on ? 1 : 0;
+    WritePrivateProfileStringA("Online", "ShowStats", g_show_stats ? "1" : "0", ini());
+}
 void online_set_diag(int on) { ensure(); g_diag = on ? 1 : 0; }

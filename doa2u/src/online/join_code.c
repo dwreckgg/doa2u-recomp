@@ -36,6 +36,45 @@ void join_endpoint_text(const join_endpoint *ep, char out[32])
     snprintf(out, 32, "%u.%u.%u.%u:%u", ep->ip[0], ep->ip[1], ep->ip[2], ep->ip[3], (unsigned)ep->port);
 }
 
+/* The packed value is shuffled before it becomes text, so a code does not
+ * show the address to whoever sees it (a stream, a screenshot): a 6-round
+ * Feistel network over the code's 36 or 48 bits with a fixed key. It hides
+ * the address from a glance or a base64 decoder, not from someone who reads
+ * this file. */
+static const uint32_t k_round_key[6] = {
+    0x9E3779B9u, 0x7F4A7C15u, 0xF39CC060u, 0x5CEDC834u, 0xB5297A4Du, 0x68E31DA4u
+};
+
+static uint32_t round_fn(uint32_t x, int r, uint32_t mask)
+{
+    x ^= k_round_key[r];
+    x ^= x >> 16; x *= 0x7FEB352Du;
+    x ^= x >> 15; x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x & mask;
+}
+
+static uint64_t scramble(uint64_t v, int bits, int forward)
+{
+    int half = bits / 2, r;
+    uint32_t mask = (1u << half) - 1u;
+    uint32_t l = (uint32_t)(v >> half) & mask, rt = (uint32_t)v & mask, t;
+    if (forward) {
+        for (r = 0; r < 6; r++) { t = rt; rt = l ^ round_fn(rt, r, mask); l = t; }
+    } else {
+        for (r = 5; r >= 0; r--) { t = l; l = rt ^ round_fn(l, r, mask); rt = t; }
+    }
+    return ((uint64_t)l << half) | rt;
+}
+
+void join_code_text_of(uint64_t packed, int len, char out[JOIN_CODE_LEN])
+{
+    int i;
+    packed = scramble(packed, len * 6, 1);
+    for (i = len - 1; i >= 0; i--) { out[i] = k_alpha[packed & 63]; packed >>= 6; }
+    out[len] = 0;
+}
+
 int join_code_make(const join_endpoint *eps, int n, char out[JOIN_CODE_LEN])
 {
     uint64_t v = 0;
@@ -50,8 +89,7 @@ int join_code_make(const join_endpoint *eps, int n, char out[JOIN_CODE_LEN])
         v = (v << 16) | eps[0].port;
         len = 8;
     }
-    for (i = len - 1; i >= 0; i--) { out[i] = k_alpha[v & 63]; v >>= 6; }
-    out[len] = 0;
+    join_code_text_of(v, len, out);
     return 1;
 }
 
@@ -91,6 +129,7 @@ int join_code_parse(const char *text, uint16_t default_port, join_endpoint *out,
         if (!p) return 0;
         v = (v << 6) | (uint64_t)(p - k_alpha);
     }
+    v = scramble(v, n * 6, 0);
     if (n == 6) {
         out[0].port = (uint16_t)(JOIN_CODE_PORT_BASE + (unsigned)(v & 15));
         v >>= 4;

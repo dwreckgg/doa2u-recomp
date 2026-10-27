@@ -5,6 +5,8 @@
  *   Delay=2          manual input delay, 1..8 frames
  *   LastJoin=        the last code joined, up to 63 characters
  *   Diag=0           diagnostic logs (events, digest logs, desync report)
+ *   ShowStats=0      the ping / input delay box over the game while connected
+ *                    (F9); written as soon as it is toggled
  *
  * Loads on first use; anything out of range reads as its default. Save
  * writes every key. */
@@ -34,6 +36,8 @@ const char *online_get_last_join(void);
 void        online_set_last_join(const char *code);
 int         online_get_diag(void);
 void        online_set_diag(int on);
+int         online_get_show_stats(void);
+void        online_set_show_stats(int on);
 
 #ifdef __cplusplus
 }

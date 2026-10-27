@@ -1,7 +1,8 @@
 /**
  * join_code.h - join codes for online play. A code carries one IPv4
  * address:port as symbols of the URL-safe base64 alphabet (A-Z a-z 0-9 - _,
- * case-sensitive):
+ * case-sensitive), shuffled with a fixed key first so the address cannot be
+ * read off the code (join_code.c):
  *
  *   6 symbols = address (32 bits) + port index (4 bits), the port being
  *               JOIN_CODE_PORT_BASE + index (7000..7015);
@@ -32,6 +33,10 @@ typedef struct {
 /* Text for eps[0] (n >= 1): 6 symbols when its port is in the indexed range,
  * else 8. Returns 1, or 0 (out = "") when there is nothing to encode. */
 int join_code_make(const join_endpoint *eps, int n, char out[JOIN_CODE_LEN]);
+
+/* The code text of an already-packed value (address and port index or port,
+ * as join_code_make packs them): scrambled, then written as symbols. */
+void join_code_text_of(uint64_t packed, int len, char out[JOIN_CODE_LEN]);
 
 /* A join code (6 or 8 symbols, surrounding blanks ignored) or a dotted
  * address with optional ":port" (else `default_port`). Fills out[0] and

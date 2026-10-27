@@ -39,7 +39,6 @@ typedef struct {
     char  event[200];         /* the latest notable event (refusal, disconnect, desync) */
     char  hint[240];          /* what to do next, when something is needed */
     unsigned short port;      /* the UDP port in use */
-    char  peer[64];           /* "a.b.c.d:port" of the other player */
     char  my_code[40];        /* this machine's join code (empty until a socket is open) */
     char  my_code_note[120];  /* what the code covers (public address found / LAN only) */
     float ping_ms;            /* round trip, averaged */
