@@ -222,14 +222,21 @@ static void test_boot_session(void)
     CHECK(st().state == NP_STATE_ACTIVE);                         /* frame 30 left Versus: no end */
     CHECK(netplay_session_frame() == 40);
     CHECK(!memcmp(fg_mem(FG_SAVE) + 26, before + 26, 2));         /* no profile yet: image untouched */
-    fg.profile = 1;                                               /* the game loads the profile */
-    script(40);
-    tick();
-    CHECK(fg_mem(FG_SAVE)[26] == 1 && fg_mem(FG_SAVE)[27] == 7);  /* every character and costume */
-    fg_mem(FG_SAVE)[26] = 0;
-    script(41);
-    tick();
-    CHECK(fg_mem(FG_SAVE)[26] == 0);                              /* once per load, not every frame */
+    {
+        int r0;
+        for (i = 30; i < 40; i++) fg_mem(FG_SAVE)[i] = (uint8_t)(0x40 + i);   /* the game loads the profile */
+        script(40);
+        tick();
+        CHECK(fg_mem(FG_SAVE)[26] == 1 && fg_mem(FG_SAVE)[27] == 7);  /* every character and costume */
+        r0 = fg.rebuilds;
+        script(41);
+        tick();
+        CHECK(fg.rebuilds == r0);                                 /* unchanged image: not applied again */
+        fg_mem(FG_SAVE)[26] = 0;                                  /* the game rewrites the image */
+        script(42);
+        tick();
+        CHECK(fg_mem(FG_SAVE)[26] == 1 && fg.rebuilds == r0 + 1); /* applied again */
+    }
     netplay_set_armed(0, NP_ROLE_HOST);
     tick();
     CHECK(st().state == NP_STATE_OFF);
@@ -408,7 +415,7 @@ static void test_boot_online(void)
     for (i = 0; i < 16; i++) CHECK(fg_mem(FG_FIGHTERS)[i] == (uint8_t)(0xA0 + i));   /* the host's regions */
     CHECK(fg_mem(FG_SAVE)[2] == 0x92);                            /* its own image, untouched */
     CHECK(fg.slot[1].buttons == 0x4242);                          /* pads from the exchange */
-    fg.profile = 1;                                               /* both games load the host's profile */
+    for (i = 30; i < 40; i++) fg_mem(FG_SAVE)[i] = (uint8_t)(0x40 + i);   /* both load the host's profile */
     tick();
     CHECK(fg_mem(FG_SAVE)[26] == 1 && fg_mem(FG_SAVE)[27] == 7);  /* unlocked */
     CHECK(!memcmp(fg_mem(FG_SAVE + 12), joiner_layout, FG_LAYOUT_LEN));   /* port 1: the joiner's layout */

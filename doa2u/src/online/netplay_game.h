@@ -59,7 +59,6 @@ void     np_game_layout_read(int port, uint8_t *layout, uint8_t *laysel);   /* l
 void     np_game_save_unlock_all(uint8_t *save);
 void     np_game_title_redirect(int on);  /* in a session: the game's saves go to a side folder */
 void     np_game_pad_history_clear(void); /* as if no button was held last frame (press edges) */
-int      np_game_profile_loaded(void);    /* the profile image is live (the game loaded ups.dat) */
 
 /* CRT rand(). */
 uint32_t np_game_rand_seed_va(void);      /* the game thread's seed word, 0 if not known yet */

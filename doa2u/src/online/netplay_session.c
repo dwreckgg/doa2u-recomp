@@ -78,7 +78,7 @@ static int       s_boot;              /* armed before the guest's entry (spec se
 static int       s_boot_armed;        /* clocks, chip and seeds in (frame 0 of a boot session) */
 static int       s_boot_online, s_boot_battle;   /* restart-on-join: waits for the provider at frame 0 */
 static int     (*s_boot_pump)(void);
-static int       s_profile_was;       /* boot sessions: the profile was live last frame */
+static uint32_t  s_profile_hash;      /* boot sessions: the save image as last seen */
 
 /* ── tables ─────────────────────────────────────────────────────────── */
 
@@ -506,6 +506,16 @@ static void begin_session(void)
 #define BOOT_QPC       0x0000000100000000ull
 #define BOOT_FILETIME  134116992000000000ull
 
+static uint32_t save_image_hash(void)
+{
+    static uint8_t *img;
+    const np_game_desc *g = np_game();
+    if (!img) img = (uint8_t *)malloc(g->save_len ? g->save_len : 1);
+    if (!img) return 0;
+    np_game_save_read(img);
+    return np_fnv32(NP_FNV32_INIT, img, g->save_len);
+}
+
 static void apply_session_profile(void)
 {
     const np_game_desc *g = np_game();
@@ -752,7 +762,7 @@ frame:
         xbox_det_begin(&b);
         mcpx_apu_det_begin(s_params.xgscnt);
         s_last_screen = np_game_screen_key();
-        s_profile_was = np_game_profile_loaded();
+        s_profile_hash = save_image_hash();
         if (online_get_diag()) {
             fprintf(stderr, "[netplay] boot session frame 0 (screen %08X, seed word %s)\n", s_last_screen,
                     s_seed_va ? "set" : "not found");
@@ -761,11 +771,14 @@ frame:
     }
     if (s_boot && s_boot_armed) {
         /* A session runs with every character and costume, and the joiner's
-         * button layout on port 1: put into the profile image on the frame
-         * the game loads it (the same frame on both machines). */
-        int loaded = np_game_profile_loaded();
-        if (loaded && !s_profile_was) apply_session_profile();
-        s_profile_was = loaded;
+         * button layout on port 1: put into the profile image whenever the game
+         * changes it (the load at the profile prompt, later saves), the same
+         * frame on both machines. (The game's profile pointer 0x87CFA8 is set at
+         * its second frame, long before the load, so it cannot say when.) */
+        if (save_image_hash() != s_profile_hash) {
+            apply_session_profile();
+            s_profile_hash = save_image_hash();
+        }
     }
     reseed_on_transition();
     if (s_abort) {                                         /* the transition resync did not arrive */

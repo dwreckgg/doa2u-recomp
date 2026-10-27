@@ -37,6 +37,7 @@
 #endif
 
 long d3d8_PresentHold(void);          /* d3d8_device.c: redraw the last frame + overlay */
+extern volatile LONG g_doa2u_heartbeat;   /* the stall watchdog's frame counter (game) */
 void doa2u_pump_messages(void);       /* main.c */
 
 #define PROTO_VERSION      2u
@@ -1320,6 +1321,7 @@ static int pv_exchange(const np_pad *local, np_pad out[2])
         if (now - last_present > 50) {
             d3d8_PresentHold();
             last_present = now;
+            InterlockedIncrement(&g_doa2u_heartbeat);   /* waiting on purpose, with its own timeout */
         }
         doa2u_pump_messages();
         Sleep(1);
@@ -1725,6 +1727,7 @@ static int boot_pump(void)
     netplay_poll();
     d3d8_PresentHold();
     doa2u_pump_messages();
+    InterlockedIncrement(&g_doa2u_heartbeat);           /* waiting on purpose, with its own timeout */
     Sleep(2);
     return 0;
 }
