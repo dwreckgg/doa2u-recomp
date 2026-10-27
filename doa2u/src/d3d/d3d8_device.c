@@ -68,9 +68,11 @@ static int window_refresh_hz(HWND hwnd)
     return dm.dmDisplayFrequency > 1 ? (int)dm.dmDisplayFrequency : 0;   /* 0 and 1 mean "hardware default" */
 }
 
+static int g_force_timer;
 static PacePlan current_plan(void)
 {
-    return pace_plan(g_refresh_hz, video_get_vrr(), g_tearing_ok);
+    /* 0 Hz = unknown: the 60 Hz timer clock (frame_pacer.h). */
+    return pace_plan(g_force_timer ? 0 : g_refresh_hz, video_get_vrr(), g_tearing_ok);
 }
 
 /* Wait until a performance-counter time: a high-resolution waitable timer for
@@ -109,8 +111,11 @@ static void wait_until(LONGLONG target, LONGLONG freq)
 /* Called once per guest Swap, before the frame is presented: holds the game
  * to 60 frames a second. Under a vsync plan the display is the clock (wait
  * until the chain can take a frame); the timer still runs as a cap so an
- * occluded or minimised window, where Present stops blocking, cannot race. */
-void d3d8_frame_pace(void)
+ * occluded or minimised window, where Present stops blocking, cannot race.
+ * extra_us delays this frame's timer boundary (an online match drifting the
+ * side that runs ahead back); force_timer makes the 60 Hz timer the clock
+ * even on a 60 Hz display, since a display clock cannot be slowed that way. */
+void d3d8_frame_pace(int extra_us, int force_timer)
 {
     static LARGE_INTEGER freq;
     static LONGLONG next;
@@ -119,12 +124,18 @@ void d3d8_frame_pace(void)
     PacePlan plan;
     if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
     if ((frames++ % 60u) == 0u) g_refresh_hz = window_refresh_hz(d3d8_GetHWND());
+    g_force_timer = force_timer != 0;
     plan = current_plan();
     if (plan.vsync_clock && g_latency_wait && !g_last_occluded)
         WaitForSingleObjectEx(g_latency_wait, 100, TRUE);
     QueryPerformanceCounter(&now);
     {
-        const LONGLONG wait = pace_timer_step(now.QuadPart, &next, freq.QuadPart, plan.cap_hz);
+        LONGLONG wait = pace_timer_step(now.QuadPart, &next, freq.QuadPart, plan.cap_hz);
+        if (extra_us > 0) {
+            const LONGLONG extra = freq.QuadPart * extra_us / 1000000;
+            next += extra;
+            wait += extra;
+        }
         if (wait > 0) wait_until(now.QuadPart + wait, freq.QuadPart);
     }
 }

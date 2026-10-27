@@ -593,8 +593,8 @@ void sub_0034AF80(void)
     uint32_t dev;
     sub_0034AF80_gen();
     {   /* 60 Hz pacing (d3d/frame_pacer.h): the display or a 60 Hz timer is the clock. */
-        extern void d3d8_frame_pace(void);
-        d3d8_frame_pace();
+        extern void d3d8_frame_pace(int extra_us, int force_timer);
+        d3d8_frame_pace(0, 0);
     }
     {
         uint32_t ret_eax = eax, ret_esp = esp;
