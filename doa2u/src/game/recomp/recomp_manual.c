@@ -622,6 +622,25 @@ static HANDLE s_rt_thread;
 
 static void pb_exec_words(const uint32_t *w, uint32_t n);
 
+/* Drawing thread, at the end of an item: a game waiting on a visibility test
+ * (GetVisibilityTestResult spins on TESTINCOMPLETE, kicking once at most)
+ * sends no more work, so keep checking the pending reports until they are
+ * written or new work arrives. The item still counts as busy, so rt_sync
+ * waits for this before the game thread touches the device. */
+static void rt_finish_reports(void)
+{
+    pb_poll_reports(0);
+    while (g_reports_n) {
+        int more;
+        AcquireSRWLockExclusive(&s_rt_lock);
+        if (s_rtq_head - s_rtq_tail <= 1) SleepConditionVariableSRW(&s_rt_cv_work, &s_rt_lock, 1, 0);
+        more = s_rtq_head - s_rtq_tail > 1;
+        ReleaseSRWLockExclusive(&s_rt_lock);
+        if (more) break;
+        pb_poll_reports(0);
+    }
+}
+
 static DWORD WINAPI rt_main(LPVOID unused)
 {
     extern void pgraph_d3d11_flush(void);
@@ -641,22 +660,9 @@ static DWORD WINAPI rt_main(LPVOID unused)
             d3d8_frame_pace(0, 0);            /* 60 Hz pacing (d3d/frame_pacer.h), next to the present */
             doa2u_present_host();
             InterlockedIncrement(&s_rt_present_done);
+            rt_finish_reports();
         } else {
             pb_exec_words(it->w, it->n);
-            pb_poll_reports(0);                                  /* visibility tests that have finished */
-            /* A game waiting on a visibility test (GetVisibilityTestResult spins on
-             * TESTINCOMPLETE) sends no more work, so finish the reports here unless
-             * new work arrives first. This item still counts as busy, so rt_sync
-             * waits for it before the game thread touches the device. */
-            while (g_reports_n) {
-                int more;
-                AcquireSRWLockExclusive(&s_rt_lock);
-                if (s_rtq_head - s_rtq_tail <= 1) SleepConditionVariableSRW(&s_rt_cv_work, &s_rt_lock, 1, 0);
-                more = s_rtq_head - s_rtq_tail > 1;
-                ReleaseSRWLockExclusive(&s_rt_lock);
-                if (more) break;
-                pb_poll_reports(0);
-            }
             MEM32(D3D_FAKE_CHANNEL + 0x44) = it->get;            /* DMA_GET: this batch consumed */
             if (it->done) {                                      /* its fences retired */
                 MEM32(it->done) = it->fence - 2;
@@ -664,6 +670,7 @@ static DWORD WINAPI rt_main(LPVOID unused)
             }
             /* The space wait patches its NOP-5 into already-copied commands: interrupt per batch. */
             InterlockedExchange(&s_gpu_irq, 1);
+            rt_finish_reports();                                 /* fences first: a fence wait never waits on queries */
         }
         AcquireSRWLockExclusive(&s_rt_lock);
         s_rtq_tail++;
