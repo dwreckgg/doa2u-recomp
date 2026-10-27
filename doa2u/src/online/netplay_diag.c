@@ -199,6 +199,7 @@ static void take_ctl_file(void)
         else if (!strcmp(cmd, "host")) netplay_host(arg[0] ? (unsigned short)atoi(arg) : netplay_port());
         else if (!strcmp(cmd, "join")) netplay_use_code(arg);
         else if (!strcmp(cmd, "disconnect")) netplay_disconnect();
+        else if (!strcmp(cmd, "start")) netplay_start_session();
         else if (!strcmp(cmd, "battle")) netplay_set_battle(atoi(arg));
         else if (!strcmp(cmd, "delay")) netplay_set_delay(!strcmp(arg, "auto"), atoi(arg));
         else if (!strcmp(cmd, "status")) {

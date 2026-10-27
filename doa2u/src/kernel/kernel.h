@@ -467,6 +467,7 @@ BOOL xbox_translate_path(const char* xbox_path, WCHAR* win_path_buf, DWORD buf_s
  * copy of TitleData taken when it is switched on, so nothing the game saves
  * during the session reaches the player's real save files. */
 void xbox_path_set_title_redirect(int on);
+const wchar_t *xbox_path_save_dir(void);   /* the save root */
 
 /* ============================================================================
  * Pool Allocator (kernel_pool.c)

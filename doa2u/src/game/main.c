@@ -948,7 +948,9 @@ int main(int argc, char **argv)
 
     watch_init();
     xbox_kernel_init();
-    xbox_path_init(NULL, NULL);   /* D:\ -> <exe folder>\assets */
+    /* D:\ -> <exe folder>\assets. DOA2U_SAVE_DIR moves the save root (a second
+     * instance on one PC, for the online loopback test). */
+    xbox_path_init(NULL, getenv("DOA2U_SAVE_DIR"));
     xbox_kernel_bridge_init();
 
     {   /* NV2A register emulation (VEH routes 0xFD000000 MMIO to it). */
@@ -980,6 +982,7 @@ int main(int argc, char **argv)
 
     {   extern void doa2u_game_init(void); doa2u_game_init(); }
     {   extern void netplay_boot_init(void); netplay_boot_init(); }   /* lockstep from boot, when asked */
+    {   extern void netplay_resume_session(void); netplay_resume_session(); }   /* restart-on-join */
 
     fprintf(stderr, "Init complete. Entry=0x%08X  ESP=0x%08X\n--- Calling xbe_entry_point() ---\n",
             DOA2U_ENTRY_POINT, g_esp);

@@ -864,6 +864,15 @@ void DrawOnlineConnection()
             if (ImGui::SmallButton("Last code")) strncpy_s(join, sizeof join, netplay_last_join(), _TRUNCATE);
         }
     }
+    if (nl.is_host && nl.state == NPL_CONNECTED) {
+        /* restart-on-join (spec section 12): both games restart into the session,
+         * so neither carries anything from before it */
+        if (ImGui::Button("Start online session")) netplay_start_session();
+        ImGui::SameLine();
+        ImGui::TextDisabled("both games restart; play anything from the title on");
+    } else if (!nl.is_host && nl.state == NPL_CONNECTED) {
+        ImGui::TextDisabled("The host starts the online session; both games then restart.");
+    }
     if (online && ImGui::Button("Disconnect")) netplay_disconnect();
     if (nl.hint[0]) ImGui::TextWrapped("%s", nl.hint);
 

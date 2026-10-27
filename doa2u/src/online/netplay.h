@@ -63,6 +63,11 @@ void netplay_host(unsigned short port);
  * joiner whose code this is (for networks that drop unsolicited packets). */
 void netplay_use_code(const char *code_or_address);
 void netplay_disconnect(void);
+/* Restart-on-join (spec section 12): the host starts the session once
+ * connected (both games restart into it); main.c calls
+ * netplay_resume_session before the guest's entry. */
+void netplay_start_session(void);
+void netplay_resume_session(void);
 /* Battle type: the host picks it in the Online tab; a joiner reads the
  * host's choice here. */
 void netplay_set_battle(int tag);

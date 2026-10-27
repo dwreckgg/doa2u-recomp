@@ -26,6 +26,7 @@ typedef struct {
     uint32_t packet[4];
     uint32_t forced;
     int      force_calls, rebuilds, redirect, session_resets, on_worker;
+    int      profile;                 /* the game has loaded a profile */
     uint32_t worker_seed;
 } fake_game_state;
 

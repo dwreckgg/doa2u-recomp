@@ -39,6 +39,13 @@ static void copy_dir_files(const WCHAR *from, const WCHAR *to)
     FindClose(h);
 }
 
+/* The save root (UserData, TitleData and their _netplay session copies live here). */
+const WCHAR *xbox_path_save_dir(void)
+{
+    if (!s_initialized) xbox_path_init(NULL, NULL);
+    return s_save_dir;
+}
+
 void xbox_path_set_title_redirect(int on)
 {
     if (!s_initialized)

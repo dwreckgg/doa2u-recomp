@@ -215,6 +215,10 @@ void np_game_title_redirect(int on) { xbox_path_set_title_redirect(on); }
 /* The builder's per-pad aggregates (the "pads" region): last frame's buttons,
  * press edges and repeat counters. The pad-forcing path clears the same block
  * (doa2u_netplay_force_pads in recomp_manual.c). */
+/* The game points 0x87CFA8 at the profile's game-data block once ups.dat is
+ * loaded (Task 4: MEM32(0x87CFA8) == SAVE_VA + 0xF200). */
+int np_game_profile_loaded(void) { return MEM32(0x0087CFA8u) == SAVE_VA + 0xF200u; }
+
 void np_game_pad_history_clear(void)
 {
     static const uint8_t zero[0x150];

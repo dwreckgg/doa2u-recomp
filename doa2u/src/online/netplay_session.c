@@ -78,6 +78,7 @@ static int       s_boot;              /* armed before the guest's entry (spec se
 static int       s_boot_armed;        /* clocks, chip and seeds in (frame 0 of a boot session) */
 static int       s_boot_online, s_boot_battle;   /* restart-on-join: waits for the provider at frame 0 */
 static int     (*s_boot_pump)(void);
+static int       s_profile_was;       /* boot sessions: the profile was live last frame */
 
 /* ── tables ─────────────────────────────────────────────────────────── */
 
@@ -505,6 +506,28 @@ static void begin_session(void)
 #define BOOT_QPC       0x0000000100000000ull
 #define BOOT_FILETIME  134116992000000000ull
 
+static void apply_session_profile(void)
+{
+    const np_game_desc *g = np_game();
+    uint8_t *img = (uint8_t *)malloc(g->save_len ? g->save_len : 1);
+    if (!img) return;
+    np_game_save_read(img);
+    np_game_save_unlock_all(img);
+    if (s_boot_online) {
+        np_game_save_apply(img, s_params.joiner_layout, s_params.joiner_laysel);
+    } else {                                           /* local: port 1 keeps this machine's layout */
+        uint8_t lay[NP_LAYOUT_MAX], sel = 0;
+        np_game_layout_read(1, lay, &sel);
+        np_game_save_apply(img, lay, sel);
+    }
+    free(img);
+    if (online_get_diag()) {
+        fprintf(stderr, "[netplay] session profile applied at frame %u (unlocked%s)\n", s_frame,
+                s_boot_online ? ", joiner layout on port 1" : "");
+        fflush(stderr);
+    }
+}
+
 int netplay_boot_online(int role, int battle)
 {
     if (!tables_ok()) return 0;
@@ -729,11 +752,20 @@ frame:
         xbox_det_begin(&b);
         mcpx_apu_det_begin(s_params.xgscnt);
         s_last_screen = np_game_screen_key();
+        s_profile_was = np_game_profile_loaded();
         if (online_get_diag()) {
             fprintf(stderr, "[netplay] boot session frame 0 (screen %08X, seed word %s)\n", s_last_screen,
                     s_seed_va ? "set" : "not found");
             fflush(stderr);
         }
+    }
+    if (s_boot && s_boot_armed) {
+        /* A session runs with every character and costume, and the joiner's
+         * button layout on port 1: put into the profile image on the frame
+         * the game loads it (the same frame on both machines). */
+        int loaded = np_game_profile_loaded();
+        if (loaded && !s_profile_was) apply_session_profile();
+        s_profile_was = loaded;
     }
     reseed_on_transition();
     if (s_abort) {                                         /* the transition resync did not arrive */
