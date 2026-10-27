@@ -271,7 +271,8 @@ static void wet_stage(MCPXAPUState *d, int at, int take)
 static void wet_submit(int n)
 {
     extern int doa2u_reverb_enabled(void);
-    if (xa2_reverb_ready() && doa2u_reverb_enabled()) xa2_reverb_submit((const int16_t *)s_wet_stage, n);
+    extern int xa2_queued(void);
+    if (xa2_reverb_ready() && doa2u_reverb_enabled()) xa2_reverb_submit((const int16_t *)s_wet_stage, n, xa2_queued());
 }
 
 void mcpx_apu_monitor_frame(MCPXAPUState *d)

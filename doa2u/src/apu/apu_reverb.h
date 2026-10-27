@@ -16,8 +16,17 @@ void xa2_reverb_shutdown(void);
 void xa2_reverb_set_i3dl2(const void *params);
 /* Non-zero once the voices exist and the game has set its room. */
 int  xa2_reverb_ready(void);
-/* One buffer of the I3DL2 send (bin 10), stereo, 48 kHz. */
-void xa2_reverb_submit(const int16_t *stereo, int num_samples);
+/* One buffer of the I3DL2 send (bin 10), stereo, 48 kHz, submitted just after
+ * the dry buffer of the same samples; dry_queued is the dry voice's queue with
+ * that buffer in it. */
+void xa2_reverb_submit(const int16_t *stereo, int num_samples, int dry_queued);
+
+#define APU_REVERB_BUFS 8
+/* Silent buffers the wet voice needs before its next buffer so that buffer
+ * plays with the dry buffer of the same samples: the dry one has
+ * dry_queued - 1 ahead of it. Never negative; capped to what the wet ring
+ * holds beside the new buffer. */
+int  apu_reverb_pad(int dry_queued, int wet_queued);
 
 #ifdef __cplusplus
 }

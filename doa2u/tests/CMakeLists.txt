@@ -17,5 +17,8 @@ target_include_directories(movie_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_executable(save_journal_test save_journal_test.c ${CMAKE_SOURCE_DIR}/src/kernel/save_journal.c)
 target_include_directories(save_journal_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-add_custom_target(host_tests DEPENDS frame_pacer_test apu_downmix_test apu_resample_test apu_hrtf_tap_test movie_names_test
+add_executable(apu_reverb_align_test apu_reverb_align_test.c ${CMAKE_SOURCE_DIR}/src/apu/apu_reverb_align.c)
+target_include_directories(apu_reverb_align_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_custom_target(host_tests DEPENDS apu_reverb_align_test frame_pacer_test apu_downmix_test apu_resample_test apu_hrtf_tap_test movie_names_test
                   save_journal_test)

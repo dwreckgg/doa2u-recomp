@@ -21,7 +21,7 @@
 
 #define RV_SAMPLE_RATE 48000
 #define RV_BUF_SAMPLES 512
-#define RV_NUM_BUFS    8
+#define RV_NUM_BUFS    APU_REVERB_BUFS
 
 static IXAudio2              *g_rv_xa2;
 static IXAudio2SubmixVoice   *g_rv_submix;
@@ -144,7 +144,9 @@ extern "C" int xa2_reverb_ready(void)
     return g_rv_source != NULL && g_rv_have_params;
 }
 
-extern "C" void xa2_reverb_submit(const int16_t *stereo, int num_samples)
+static const int16_t g_rv_silence[RV_BUF_SAMPLES][2] = {{0}};
+
+extern "C" void xa2_reverb_submit(const int16_t *stereo, int num_samples, int dry_queued)
 {
     XAUDIO2_VOICE_STATE state;
     XAUDIO2_BUFFER xbuf;
@@ -154,6 +156,14 @@ extern "C" void xa2_reverb_submit(const int16_t *stereo, int num_samples)
     g_rv_source->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
     if ((int)state.BuffersQueued >= RV_NUM_BUFS - 1) return;   /* never overwrite a queued buffer */
     if (num_samples > RV_BUF_SAMPLES) num_samples = RV_BUF_SAMPLES;
+    /* behind as many buffers as the dry voice, so the reverb never plays ahead
+     * of its sound (an empty wet voice would start at once) */
+    for (int pad = apu_reverb_pad(dry_queued, (int)state.BuffersQueued); pad > 0; pad--) {
+        memset(&xbuf, 0, sizeof(xbuf));
+        xbuf.AudioBytes = (UINT32)(num_samples * 2 * sizeof(int16_t));
+        xbuf.pAudioData = (const BYTE *)g_rv_silence;
+        g_rv_source->SubmitSourceBuffer(&xbuf, NULL);
+    }
     idx = g_rv_next;
     memcpy(g_rv_bufs[idx], stereo, (size_t)num_samples * 2 * sizeof(int16_t));
     memset(&xbuf, 0, sizeof(xbuf));
