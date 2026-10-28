@@ -33,6 +33,8 @@
 #include "ui/profile_settings.h"
 #include "netplay_handoff.h"
 #include "netplay_files.h"
+#include "netplay_sweep.h"
+#include "netplay_game.h"
 #include "gekkonet.h"
 
 #ifndef SIO_UDP_CONNRESET
@@ -43,7 +45,8 @@ long d3d8_PresentHold(void);          /* d3d8_device.c: redraw the last frame + 
 extern volatile LONG g_doa2u_heartbeat;   /* the stall watchdog's frame counter (game) */
 void doa2u_pump_messages(void);       /* main.c */
 
-#define PROTO_VERSION      4u   /* 3: hello carries the game-files fingerprint; 4: hash-first resync */
+#define PROTO_VERSION      5u   /* 3: hello carries the game-files fingerprint; 4: hash-first resync;
+                                 * 5: counters in the frame digest, the RAM sweep (PK_SWEEP) */
 #define PK_MAGIC           0x32414F44u  /* "DOA2" */
 #define CHUNK_BYTES        1200
 #define MAX_CHUNKS         255          /* the save image alone is ~74 KB in DOA2U */
@@ -64,7 +67,8 @@ void doa2u_pump_messages(void);       /* main.c */
 #define STUN_GIVEUP_MS     4000
 
 enum { PK_HELLO = 1, PK_WELCOME, PK_PING, PK_PONG, PK_READY, PK_CHUNK, PK_ACK, PK_LEAVE, PK_BYE, PK_PUNCH, PK_DIGEST,
-       PK_BOOTREPLY };   /* the joiner's answer to a session (restart-on-join) */
+       PK_BOOTREPLY,     /* the joiner's answer to a session (restart-on-join) */
+       PK_SWEEP };       /* one frame's RAM-sweep hashes (diagnostic logs on) */
 enum { MSG_START = 1, MSG_RESYNC = 2, MSG_BOOT = 3, MSG_RESYNC_HASH = 4, MSG_RESYNC_REQ = 5 };
 enum { LEAVE_LEFT = 0, LEAVE_CANCEL, LEAVE_DESYNC, LEAVE_MISMATCH, LEAVE_BADSTART };
 
@@ -79,6 +83,7 @@ typedef struct { uint32_t id; uint64_t have[4]; } pk_ack;
 typedef struct { uint32_t token; uint8_t ok; uint8_t pad[3]; } pk_bootreply;
 typedef struct { uint32_t token; uint8_t reason; } pk_leave;   /* token: the match's, from START */
 typedef struct { uint32_t frame; uint32_t n; } pk_digest;      /* + n x uint32 region hashes */
+typedef struct { uint32_t frame, first, count; } pk_sweep;     /* + count x uint32 block hashes */
 #pragma pack(pop)
 
 /* ── state ─────────────────────────────────────────────────────────── */
@@ -422,6 +427,164 @@ static void compare_digest(uint32_t frame, const uint32_t *theirs, int n)
     line[sizeof(line) - 1] = 0;
     set_event("%s", line);
     netplay_session_set_end_note(line);
+}
+
+/* A line for the log and, with diagnostic logs on, the events file, without
+ * touching the status text the Online tab shows. */
+static void diag_line(const char *fmt, ...)
+{
+    char line[300];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf(line, sizeof(line) - 1, fmt, ap);
+    va_end(ap);
+    line[sizeof(line) - 1] = 0;
+    fprintf(stderr, "[netplay] %s\n", line);
+    fflush(stderr);
+    if (s_diag) {
+        FILE *f = fopen("netplay_events.txt", "a");
+        if (f) {
+            SYSTEMTIME t;
+            GetLocalTime(&t);
+            fprintf(f, "%02u:%02u:%02u.%03u %s frame %u: %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds,
+                    s_is_host ? "host" : "joiner", s_match_frame, line);
+            fclose(f);
+        }
+    }
+}
+
+/* ── the RAM sweep (netplay_sweep.h), diagnostic logs on ─────────────
+ * Every lockstep frame both games hash 16 of the 2047 64 KB blocks of guest RAM
+ * (all of it every 128 frames, about 2 s) and send the hashes; each side compares
+ * the other's with its own for the same frame and logs every block that starts
+ * or stops differing. The first time a block differs, both sides write that
+ * block to netplay_block_<address>_f<frame>_<role>.bin at the same later frame
+ * (the frame the difference showed + SWEEP_DUMP_AFTER, the same on both), so
+ * the two files can be compared byte by byte. The frame digest still decides a
+ * desync; the sweep only says where else, and since when, the games differ. */
+#define SWEEP_PER_FRAME   16u
+#define SWEEP_DUMP_AFTER  120u
+#define SWEEP_DUMPS_MAX   32
+static np_sweep s_sw;
+static int      s_sw_on;
+static struct { uint32_t va, frame; } s_sw_dump[SWEEP_DUMPS_MAX];
+static int      s_sw_ndump, s_sw_events;
+static uint64_t s_sw_us, s_sw_frames;      /* hashing time, for the end-of-session line */
+/* Per block, how often it changed state: a block that flips every cycle (the raw
+ * pad slots, polled from this PC's own controller before the session overwrites
+ * them) is logged three times, then only counted; the end of the session lists it. */
+static uint16_t s_sw_flips[NP_GAME_SWEEP_HI / NP_GAME_SWEEP_BLOCK];
+static void     sweep_events(const np_sweep_event *ev, int n);
+
+static void sweep_start(void)
+{
+    s_sw_on = 0;
+    s_sw_ndump = s_sw_events = 0;
+    s_sw_us = s_sw_frames = 0;
+    memset(s_sw_flips, 0, sizeof s_sw_flips);
+    if (!s_diag) return;
+    np_sweep_free(&s_sw);
+    s_sw_on = np_sweep_init(&s_sw, NP_GAME_SWEEP_LO, NP_GAME_SWEEP_HI, NP_GAME_SWEEP_BLOCK, SWEEP_PER_FRAME,
+                            np_game_block_ptr);
+    diag_line("RAM sweep %s: %08X..%08X, %u blocks of %u KB, %u a frame", s_sw_on ? "on" : "could not start",
+              NP_GAME_SWEEP_LO, NP_GAME_SWEEP_HI, s_sw.nblocks, NP_GAME_SWEEP_BLOCK / 1024u, SWEEP_PER_FRAME);
+}
+
+/* The state entering `frame` (the session core's digest point, the same on both). */
+static void sweep_frame(uint32_t frame)
+{
+    uint8_t buf[sizeof(pk_sweep) + 4 * NP_SWEEP_MAX_PER_FRAME];
+    pk_sweep p;
+    uint32_t h[NP_SWEEP_MAX_PER_FRAME];
+    int i;
+    if (!s_sw_on) return;
+    p.frame = frame;
+    {
+        LARGE_INTEGER t0, t1, f;
+        QueryPerformanceCounter(&t0);
+        p.count = np_sweep_local(&s_sw, frame, &p.first, h);
+        QueryPerformanceCounter(&t1);
+        QueryPerformanceFrequency(&f);
+        s_sw_us += (uint64_t)((t1.QuadPart - t0.QuadPart) * 1000000 / f.QuadPart);
+        s_sw_frames++;
+    }
+    memcpy(buf, &p, sizeof p);
+    memcpy(buf + sizeof p, h, 4 * p.count);
+    send_peer(PK_SWEEP, buf, (unsigned)(sizeof p + 4 * p.count));
+    {   /* the other side's hashes for this frame, if they came before ours */
+        np_sweep_event ev[NP_SWEEP_MAX_PER_FRAME];
+        sweep_events(ev, np_sweep_pending(&s_sw, frame, ev, NP_SWEEP_MAX_PER_FRAME));
+    }
+    for (i = 0; i < s_sw_ndump; i++) {
+        if (s_sw_dump[i].frame == frame) {
+            char name[96];
+            const uint8_t *src = np_game_block_ptr(s_sw_dump[i].va);
+            FILE *f;
+            _snprintf(name, sizeof(name) - 1, "netplay_block_%08X_f%u_%s.bin", s_sw_dump[i].va, frame,
+                      s_is_host ? "host" : "joiner");
+            name[sizeof(name) - 1] = 0;
+            f = fopen(name, "wb");
+            if (f) {
+                if (src) fwrite(src, 1, NP_GAME_SWEEP_BLOCK, f);
+                fclose(f);
+            }
+        }
+    }
+}
+
+static void sweep_events(const np_sweep_event *ev, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        uint32_t at = ev[i].frame + SWEEP_DUMP_AFTER, k = ev[i].va / NP_GAME_SWEEP_BLOCK;
+        s_sw_events++;
+        if (s_sw_flips[k] < 0xFFFF) s_sw_flips[k]++;
+        if (s_sw_flips[k] <= 3 && s_sw_events <= 400)
+            diag_line("RAM sweep: %08X..%08X %s at frame %u%s%s", ev[i].va, ev[i].va + NP_GAME_SWEEP_BLOCK - 1,
+                      ev[i].differs ? "DIFFERS from the other side" : "is the same again", ev[i].frame,
+                      ev[i].differs && s_sw_ndump < SWEEP_DUMPS_MAX && at > s_match_frame ? " (both write it out)" : "",
+                      s_sw_flips[k] == 3 ? " (it keeps changing: no more lines for it)" : "");
+        if (ev[i].differs && s_sw_ndump < SWEEP_DUMPS_MAX && at > s_match_frame) {
+            int k, dup = 0;
+            for (k = 0; k < s_sw_ndump; k++) if (s_sw_dump[k].va == ev[i].va) dup = 1;
+            if (!dup) {
+                s_sw_dump[s_sw_ndump].va = ev[i].va;
+                s_sw_dump[s_sw_ndump].frame = at;
+                s_sw_ndump++;
+            }
+        }
+    }
+}
+
+static void sweep_peer(const uint8_t *body, unsigned blen)
+{
+    pk_sweep p;
+    uint32_t h[NP_SWEEP_MAX_PER_FRAME];
+    np_sweep_event ev[NP_SWEEP_MAX_PER_FRAME];
+    if (!s_sw_on || s_state != NPL_INMATCH || blen < sizeof p) return;
+    memcpy(&p, body, sizeof p);
+    if (p.count > NP_SWEEP_MAX_PER_FRAME || blen < sizeof p + 4 * p.count) return;
+    memcpy(h, body + sizeof p, 4 * p.count);
+    sweep_events(ev, np_sweep_peer(&s_sw, p.frame, p.first, p.count, h, ev, NP_SWEEP_MAX_PER_FRAME));
+}
+
+static void sweep_end(void)
+{
+    uint32_t k, ndiff = 0;
+    if (!s_sw_on) return;
+    for (k = 0; k < s_sw.nblocks; k++) if (s_sw.state[k] == 2) ndiff++;
+    diag_line("RAM sweep at the end: %u blocks differ, %u events; peer frames compared %u (%u of them came "
+              "before ours), too late %u, other batch %u; hashing took %.3f ms a frame on average",
+              ndiff, s_sw_events, s_sw.compared, s_sw.early, s_sw.late, s_sw.mismatched,
+              s_sw_frames ? (double)s_sw_us / 1000.0 / (double)s_sw_frames : 0.0);
+    for (k = 0; k < s_sw.nblocks; k++) {
+        uint32_t va = s_sw.lo + k * s_sw.block, flips = s_sw_flips[va / NP_GAME_SWEEP_BLOCK];
+        if (s_sw.state[k] == 2 || flips > 3)
+            diag_line("RAM sweep: %08X..%08X %s since frame %u (%u changes)", va, va + s_sw.block - 1,
+                      s_sw.state[k] == 2 ? "differs" : "is the same", s_sw.since[k], flips);
+    }
+    np_sweep_free(&s_sw);
+    s_sw_on = 0;
 }
 
 /* The game files' fingerprint (netplay_files.c), worked out once; with diagnostic logs
@@ -1085,6 +1248,9 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
         compare_digest(d.frame, theirs, (int)d.n);
         break;
     }
+    case PK_SWEEP:
+        if (from_peer) sweep_peer(body, blen);
+        break;
     case PK_BYE:
         if (from_peer) drop_peer("The other player disconnected.");
         break;
@@ -1358,6 +1524,7 @@ static int pv_barrier(int at_barrier, int tag)
     s_peer_ready_t = 0;
     set_banner("", 0);
     set_event("%s Battle started online (input delay %d).", tag ? "Tag" : "Single", s_delay_used);
+    sweep_start();
     return 1;
 }
 
@@ -1500,12 +1667,14 @@ static void pv_digest(uint32_t frame, uint64_t digest)
     }
     s_save_checksum = s_save_len = NULL;
     s_save_state = NULL;
+    sweep_frame(frame);
     s_match_frame = frame + 1;
 }
 
 static void pv_end(void)
 {
     tm_report();                                         /* the last, partial window */
+    sweep_end();
     memset(&s_tm, 0, sizeof s_tm);                       /* the next session starts afresh */
     if (s_resume) {
         /* The online session is over (a desync, a lost player, a disarm). This

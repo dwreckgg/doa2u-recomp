@@ -58,6 +58,7 @@ add_library(doa2u_online STATIC
     join_code.c
     netplay_files.c
     netplay_handoff.c
+    netplay_sweep.c
     netplay.c
     net_upnp.c
     doa2u_game.c

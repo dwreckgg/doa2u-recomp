@@ -3,6 +3,7 @@
  * guest call online play needs. Each address says how it was found, so a
  * reader can re-check it against the generated code or a RAM dump.
  */
+#include <windows.h>
 #include <string.h>
 
 #include "netplay_game.h"
@@ -33,6 +34,26 @@ void np_game_read(uint32_t va, void *dst, uint32_t len)
 void np_game_write(uint32_t va, const void *src, uint32_t len)
 {
     memcpy((void *)XBOX_PTR(va), src, len);
+}
+
+/* Guest RAM is one 128 MB view of a page-file section (kernel/xbox_memory_layout.c),
+ * so every block is normally mapped; each is checked once and remembered. */
+const uint8_t *np_game_block_ptr(uint32_t va)
+{
+    static uint8_t s_known[NP_GAME_SWEEP_HI / NP_GAME_SWEEP_BLOCK];   /* 0 not checked, 1 mapped, 2 not */
+    const uint8_t *host;
+    uint32_t k = va / NP_GAME_SWEEP_BLOCK;
+    if (va % NP_GAME_SWEEP_BLOCK || va >= NP_GAME_SWEEP_HI) return NULL;
+    host = (const uint8_t *)XBOX_PTR(va);
+    if (!s_known[k]) {
+        MEMORY_BASIC_INFORMATION mbi;
+        s_known[k] = 2;
+        if (VirtualQuery(host, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT &&
+            !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
+            (const uint8_t *)mbi.BaseAddress + mbi.RegionSize >= host + NP_GAME_SWEEP_BLOCK)
+            s_known[k] = 1;
+    }
+    return s_known[k] == 1 ? host : NULL;
 }
 
 void np_game_pad_read(int port, np_pad *p)

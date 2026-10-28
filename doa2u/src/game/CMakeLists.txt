@@ -146,3 +146,4 @@ doa2u_host_test(netplay_session_test ${ONLINE_DIR}/netplay_session.c ${ONLINE_DI
                 ${CMAKE_SOURCE_DIR}/tests/fake_game.c ${CMAKE_SOURCE_DIR}/tests/netplay_stubs.c)
 target_include_directories(netplay_session_test PRIVATE ${CMAKE_BINARY_DIR}/src/online/generated)   # np_build_id.h
 add_dependencies(netplay_session_test np_build_id)
+doa2u_host_test(netplay_sweep_test ${ONLINE_DIR}/netplay_sweep.c ${CMAKE_SOURCE_DIR}/tests/netplay_sweep_test.c)

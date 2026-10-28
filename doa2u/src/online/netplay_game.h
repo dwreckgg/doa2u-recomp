@@ -28,6 +28,12 @@ const np_game_desc *np_game(void);
 
 void     np_game_read(uint32_t va, void *dst, uint32_t len);
 void     np_game_write(uint32_t va, const void *src, uint32_t len);
+/* The whole guest RAM the RAM sweep covers (netplay_sweep.h), and the host
+ * address of a 64 KB block of it, or NULL when that block is not mapped. */
+#define  NP_GAME_SWEEP_LO    0x00010000u
+#define  NP_GAME_SWEEP_HI    0x08000000u   /* low RAM, then the high heap (worker stacks at 0x050xxxxx) */
+#define  NP_GAME_SWEEP_BLOCK 0x00010000u
+const uint8_t *np_game_block_ptr(uint32_t va);
 
 /* Screens. */
 int      np_game_at_charsel(void);      /* on the Versus character select (Single or Tag) */
