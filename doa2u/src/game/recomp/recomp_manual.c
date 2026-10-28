@@ -492,9 +492,23 @@ static void pb_side_method(uint32_t method, uint32_t param)
                     va = pg + (param & 0xFF0u);
             }
             if (va) {
-                MEM32(va) = GetTickCount(); MEM32(va + 4) = 0;
+                /* An online session keeps this PC's uptime out of guest memory: the
+                 * report's time is the session clock. The pixel count still comes from
+                 * this PC's GPU at its own resolution; the first reports of a session
+                 * are logged, so two PCs' logs say whether the game uses them. */
+                extern volatile int g_xbox_det_active;
+                extern uint32_t xbox_det_tick_ms(void);
+                MEM32(va) = g_xbox_det_active ? xbox_det_tick_ms() : GetTickCount(); MEM32(va + 4) = 0;
                 MEM32(va + 8) = g_zpass_acc;
                 MEM32(va + 0xC) = 0;
+                if (g_xbox_det_active) {
+                    static int s_logged;
+                    if (s_logged < 8) {
+                        s_logged++;
+                        fprintf(stderr, "[netplay] GET_REPORT in a session: slot %08X, pixel count %u\n", va, g_zpass_acc);
+                        fflush(stderr);
+                    }
+                }
             }
         }
         break;
