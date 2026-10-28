@@ -988,6 +988,16 @@ int netplay_sync_capture(const uint8_t **blob, uint32_t *len)
     return 1;
 }
 
+/* One hash per sync region, as they are now: at a screen change both sides compare
+ * them, and the host's copy travels only when they differ. */
+int netplay_sync_hashes(uint32_t *out, int max)
+{
+    const np_game_desc *g = np_game();
+    int k, n = g->n_sync < max ? g->n_sync : max;
+    for (k = 0; k < n; k++) out[k] = region_hash(&g->sync[k]);
+    return n;
+}
+
 int netplay_sync_apply(const uint8_t *blob, uint32_t len)
 {
     if (!blob || len != sync_total()) return 0;

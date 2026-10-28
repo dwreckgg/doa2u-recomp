@@ -8,6 +8,40 @@
 #define RP_VERSION 1u
 #define PAD_WIRE   18u
 
+uint32_t np_rhash_pack(uint32_t index, const uint32_t *h, uint32_t n, uint8_t *dst, uint32_t cap)
+{
+    uint32_t len = 8 + 4 * n;
+    if (!dst || cap < len) return 0;
+    memcpy(dst, &index, 4);
+    memcpy(dst + 4, &n, 4);
+    if (n) memcpy(dst + 8, h, 4 * (size_t)n);
+    return len;
+}
+
+int np_rhash_unpack(const uint8_t *src, uint32_t len, uint32_t *index, uint32_t *h, uint32_t max, uint32_t *n)
+{
+    uint32_t cnt;
+    if (!src || len < 8) return 0;
+    memcpy(&cnt, src + 4, 4);
+    if (cnt > max || len != 8 + 4 * cnt) return 0;
+    memcpy(index, src, 4);
+    if (cnt) memcpy(h, src + 8, 4 * (size_t)cnt);
+    *n = cnt;
+    return 1;
+}
+
+int np_rhash_diff(const uint32_t *a, const uint32_t *b, uint32_t n, int *idx, int max)
+{
+    uint32_t k;
+    int d = 0;
+    for (k = 0; k < n; k++) {
+        if (a[k] == b[k]) continue;
+        if (d < max) idx[d] = (int)k;
+        d++;
+    }
+    return d;
+}
+
 uint32_t np_build_id(const char *commit, int dirty, uint32_t link_stamp)
 {
     uint32_t len = 0, id;

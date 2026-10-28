@@ -60,6 +60,13 @@ uint32_t np_fnv32(uint32_t h, const void *p, uint32_t len);
  * git commit when the tree was clean (any build of that commit matches),
  * else the exe's link stamp (only the very same exe matches). */
 uint32_t np_build_id(const char *commit, int dirty, uint32_t link_stamp);
+
+/* The screen-change check (netplay.c): the transition's index and one hash per
+ * sync region. pack returns the length (0 when `cap` is short); unpack returns 1
+ * when it loaded; diff returns how many hashes differ and lists up to `max`. */
+uint32_t np_rhash_pack(uint32_t index, const uint32_t *h, uint32_t n, uint8_t *dst, uint32_t cap);
+int      np_rhash_unpack(const uint8_t *src, uint32_t len, uint32_t *index, uint32_t *h, uint32_t max, uint32_t *n);
+int      np_rhash_diff(const uint32_t *a, const uint32_t *b, uint32_t n, int *idx, int max);
 /* Folds the per-region hashes of one frame into its digest (order matters). */
 uint64_t np_digest_combine(const uint32_t *hashes, int n);
 

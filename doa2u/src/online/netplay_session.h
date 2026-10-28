@@ -128,6 +128,7 @@ typedef struct {
 
 int  netplay_sync_capture(const uint8_t **blob, uint32_t *len);
 int  netplay_sync_apply(const uint8_t *blob, uint32_t len);
+int  netplay_sync_hashes(uint32_t *out, int max);   /* one hash per sync region; returns how many */
 void netplay_set_provider(const np_provider *p);   /* NULL: local sessions only */
 int  netplay_has_provider(void);
 

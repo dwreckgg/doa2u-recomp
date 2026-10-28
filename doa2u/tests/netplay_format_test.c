@@ -14,6 +14,24 @@ static void fill(uint8_t *b, uint32_t n, uint8_t start)
     for (i = 0; i < n; i++) b[i] = (uint8_t)(start + 7 * i);
 }
 
+/* The screen-change check: index + one hash per region, packed and compared. */
+static void test_rhash(void)
+{
+    uint32_t a[5] = { 11, 22, 33, 44, 55 }, b[5], idx = 0, n = 0;
+    uint8_t buf[64];
+    int diff[8];
+    uint32_t len = np_rhash_pack(7, a, 5, buf, sizeof buf);
+    CHECK(len == 8 + 5 * 4);
+    CHECK(np_rhash_pack(7, a, 5, buf, len - 1) == 0);              /* short buffer */
+    CHECK(np_rhash_unpack(buf, len, &idx, b, 5, &n) == 1 && idx == 7 && n == 5 && !memcmp(a, b, sizeof a));
+    CHECK(np_rhash_unpack(buf, len - 1, &idx, b, 5, &n) == 0);      /* cut short */
+    CHECK(np_rhash_unpack(buf, len, &idx, b, 4, &n) == 0);          /* more hashes than room */
+    CHECK(np_rhash_diff(a, b, 5, diff, 8) == 0);
+    b[1] = 99; b[4] = 98;
+    CHECK(np_rhash_diff(a, b, 5, diff, 8) == 2 && diff[0] == 1 && diff[1] == 4);
+    CHECK(np_rhash_diff(a, b, 5, diff, 1) == 2 && diff[0] == 1);   /* counts all, lists what fits */
+}
+
 /* The identity two games compare before playing: the same commit built
  * cleanly anywhere matches; a modified tree or a build without git keeps the
  * per-link stamp, so it only matches the very same exe. */
@@ -185,6 +203,7 @@ int main(void)
     test_blob();
     test_replay();
     test_build_id();
+    test_rhash();
     printf("netplay_format_test: %d failure(s)\n", failures);
     return failures;
 }

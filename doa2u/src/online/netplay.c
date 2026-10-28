@@ -43,7 +43,7 @@ long d3d8_PresentHold(void);          /* d3d8_device.c: redraw the last frame + 
 extern volatile LONG g_doa2u_heartbeat;   /* the stall watchdog's frame counter (game) */
 void doa2u_pump_messages(void);       /* main.c */
 
-#define PROTO_VERSION      3u   /* 3: hello carries the game-files fingerprint */
+#define PROTO_VERSION      4u   /* 3: hello carries the game-files fingerprint; 4: hash-first resync */
 #define PK_MAGIC           0x32414F44u  /* "DOA2" */
 #define CHUNK_BYTES        1200
 #define MAX_CHUNKS         255          /* the save image alone is ~74 KB in DOA2U */
@@ -65,7 +65,7 @@ void doa2u_pump_messages(void);       /* main.c */
 
 enum { PK_HELLO = 1, PK_WELCOME, PK_PING, PK_PONG, PK_READY, PK_CHUNK, PK_ACK, PK_LEAVE, PK_BYE, PK_PUNCH, PK_DIGEST,
        PK_BOOTREPLY };   /* the joiner's answer to a session (restart-on-join) */
-enum { MSG_START = 1, MSG_RESYNC = 2, MSG_BOOT = 3 };
+enum { MSG_START = 1, MSG_RESYNC = 2, MSG_BOOT = 3, MSG_RESYNC_HASH = 4, MSG_RESYNC_REQ = 5 };
 enum { LEAVE_LEFT = 0, LEAVE_CANCEL, LEAVE_DESYNC, LEAVE_MISMATCH, LEAVE_BADSTART };
 
 #pragma pack(push, 1)
@@ -155,6 +155,15 @@ static int      s_start_pending, s_start_tag, s_start_delay;
 static uint8_t *s_resync_blob;
 static uint32_t s_resync_len, s_resync_index;
 static int      s_resync_pending;
+/* Hash-first resync: at a screen change the host sends one hash per sync region;
+ * the joiner asks for the regions themselves only when its own hashes differ. */
+#define RHASH_MAX 128
+static uint32_t s_rhash[RHASH_MAX], s_rhash_n, s_rhash_index;    /* joiner: the host's, received */
+static int      s_rhash_pending;
+static uint8_t *s_rsave_blob;                                     /* host: the regions at its last transition */
+static uint32_t s_rsave_len, s_rsave_index;
+static uint32_t s_rreq_index;                                     /* host: a full copy the joiner asked for */
+static int      s_rreq_pending;
 
 /* GekkoNet */
 static GekkoSession *s_gk;
@@ -663,6 +672,13 @@ static void rx_deliver(void)
         extern void netplay_boot_joiner_received(const uint8_t *data, uint32_t len);
         if (s_is_host || s_state != NPL_CONNECTED) return;
         netplay_boot_joiner_received(s_rx.data, total);
+    } else if (s_rx.type == MSG_RESYNC_HASH) {
+        if (s_is_host) return;
+        if (np_rhash_unpack(s_rx.data, total, &s_rhash_index, s_rhash, RHASH_MAX, &s_rhash_n)) s_rhash_pending = 1;
+    } else if (s_rx.type == MSG_RESYNC_REQ) {
+        if (!s_is_host || total < 4) return;
+        memcpy(&s_rreq_index, s_rx.data, 4);
+        s_rreq_pending = 1;
     } else if (s_rx.type == MSG_RESYNC) {
         if (s_is_host || total < 4) return;
         free(s_resync_blob);
@@ -1115,6 +1131,25 @@ static void drain(void)
 
 /* Socket traffic and timers. Called from the per-frame poll and from inside
  * the lockstep wait. */
+/* Host: the joiner's regions differed at a screen change and it asked for the
+ * host's copy of that transition; sent as soon as the channel is free. */
+static void serve_resync_request(void)
+{
+    uint8_t *msg;
+    if (!s_is_host || !s_rreq_pending || s_tx.active) return;
+    s_rreq_pending = 0;
+    if (!s_rsave_blob || s_rreq_index != s_rsave_index) {
+        set_event("The other player asked for an older resync (%u, kept %u).", s_rreq_index, s_rsave_index);
+        return;
+    }
+    msg = (uint8_t *)malloc(s_rsave_len + 4);
+    if (!msg) return;
+    memcpy(msg, &s_rsave_index, 4);
+    memcpy(msg + 4, s_rsave_blob, s_rsave_len);
+    tx_begin(MSG_RESYNC, msg, s_rsave_len + 4);
+    free(msg);
+}
+
 static void poll_network(void)
 {
     DWORD now = GetTickCount();
@@ -1189,6 +1224,7 @@ static void poll_network(void)
             return;
         }
         if (s_leave_repeat > 0) { send_leave(s_match_serial, (uint8_t)s_end_reason); s_leave_repeat--; }
+        serve_resync_request();
         tx_pump(now);
         break;
     default:
@@ -1331,7 +1367,7 @@ static int pv_barrier(int at_barrier, int tag)
  * Which of them is large says whether a slow session is this PC, the other one or
  * the network. */
 static struct {
-    uint32_t frames, waits, wait_max, frame_max, resyncs, resync_max, resync_bytes;
+    uint32_t frames, waits, wait_max, frame_max, resyncs, resync_max, resync_bytes, resync_full;
     uint64_t wait_ms, frame_ms, resync_ms;
     int      ahead_min, ahead_max;
     LARGE_INTEGER last_end;
@@ -1351,10 +1387,10 @@ static void tm_report(void)
     if (!s_tm.frames) return;
     if (online_get_diag()) {
         fprintf(stderr, "[netplay] timing over %u frames: own frame avg %.1f ms (max %u), waited for the other "
-                "player %.0f ms total in %u frames (max %u), frames ahead %d..%d, resyncs %u (waited %.0f ms, "
-                "max %u, %u KB)%c",
+                "player %.0f ms total in %u frames (max %u), frames ahead %d..%d, resyncs %u (full copies %u, waited "
+                "%.0f ms, max %u, %u KB)%c",
                 s_tm.frames, (double)s_tm.frame_ms / s_tm.frames, s_tm.frame_max, (double)s_tm.wait_ms, s_tm.waits,
-                s_tm.wait_max, s_tm.ahead_min, s_tm.ahead_max, s_tm.resyncs, (double)s_tm.resync_ms, s_tm.resync_max,
+                s_tm.wait_max, s_tm.ahead_min, s_tm.ahead_max, s_tm.resyncs, s_tm.resync_full, (double)s_tm.resync_ms, s_tm.resync_max,
                 s_tm.resync_bytes / 1024u, 10);
         fflush(stderr);
     }
@@ -1529,20 +1565,25 @@ static void pv_end(void)
     }
 }
 
-/* Screen transition inside the match (same lockstep frame on both sides):
- * the host sends its fight-state regions, the joiner waits for them and
- * applies them before the frame goes on. */
+/* Screen transition inside the match (same lockstep frame on both sides).
+ * Hash first: the host sends one hash per sync region (a few hundred bytes) and
+ * keeps the regions themselves; the joiner compares the hashes with its own and
+ * goes on at once when they match. Only when they differ does it ask for the
+ * host's regions, wait for them and apply them before the frame goes on (the old
+ * way, about 82 KB at every screen change, froze the joiner for a round trip and
+ * the whole transfer each time). */
 static int pv_transition(uint32_t index)
 {
     DWORD t0 = GetTickCount(), last_present = t0;
     LARGE_INTEGER tr;
+    int asked = 0;
     QueryPerformanceCounter(&tr);
     if (s_state != NPL_INMATCH) return 1;
     if (s_is_host) {
         const uint8_t *blob;
-        uint32_t len;
-        uint8_t *msg;
-        /* a previous message still in flight (the start, or the last resync)
+        uint32_t len, h[RHASH_MAX], n, mlen;
+        uint8_t msg[8 + 4 * RHASH_MAX];
+        /* a previous message still in flight (the start, a check, a full copy)
          * must finish first: the channel carries one at a time */
         while (s_tx.active) {
             poll_network();
@@ -1552,18 +1593,18 @@ static int pv_transition(uint32_t index)
             Sleep(1);
         }
         if (!netplay_sync_capture(&blob, &len)) return 1;
-        msg = (uint8_t *)malloc(len + 4);
-        if (!msg) return 1;
-        memcpy(msg, &index, 4);
-        memcpy(msg + 4, blob, len);
-        tx_begin(MSG_RESYNC, msg, len + 4);
-        free(msg);
-        {   /* the host waits only for the previous resync to finish */
+        free(s_rsave_blob);                              /* kept in case the joiner's differ */
+        s_rsave_blob = (uint8_t *)malloc(len ? len : 1);
+        if (s_rsave_blob) { memcpy(s_rsave_blob, blob, len); s_rsave_len = len; s_rsave_index = index; }
+        n = (uint32_t)netplay_sync_hashes(h, RHASH_MAX);
+        mlen = np_rhash_pack(index, h, n, msg, sizeof msg);
+        if (mlen) tx_begin(MSG_RESYNC_HASH, msg, mlen);
+        {
             uint32_t ms = tm_ms_since(&tr);
             s_tm.resyncs++;
             s_tm.resync_ms += ms;
             if (ms > s_tm.resync_max) s_tm.resync_max = ms;
-            s_tm.resync_bytes += len;
+            s_tm.resync_bytes += mlen;
         }
         return 1;
     }
@@ -1571,18 +1612,53 @@ static int pv_transition(uint32_t index)
         DWORD now;
         poll_network();
         if (s_state != NPL_INMATCH || s_peer_left) return 0;
-        if (s_resync_pending && s_resync_index == index) {
+        if (s_resync_pending && s_resync_index == index) {   /* the host's regions, asked for */
             int ok = netplay_sync_apply(s_resync_blob, s_resync_len);
             uint32_t ms = tm_ms_since(&tr);
             s_tm.resyncs++;
+            s_tm.resync_full++;
             s_tm.resync_ms += ms;
             if (ms > s_tm.resync_max) s_tm.resync_max = ms;
             s_tm.resync_bytes += s_resync_len;
             s_resync_pending = 0;
+            s_rhash_pending = 0;
             if (!ok) set_event("Transition resync %u had the wrong size (different build?).", index);
             return 1;
         }
         if (s_resync_pending && s_resync_index > index) return 1;   /* already past it */
+        if (s_rhash_pending && s_rhash_index > index) return 1;
+        if (s_rhash_pending && s_rhash_index == index && !asked) {
+            uint32_t mine[RHASH_MAX];
+            int diff[8], d, k;
+            uint32_t n = (uint32_t)netplay_sync_hashes(mine, RHASH_MAX);
+            d = n == s_rhash_n ? np_rhash_diff(s_rhash, mine, n, diff, 8) : -1;
+            if (d == 0) {                                    /* the same state: nothing to copy */
+                uint32_t ms = tm_ms_since(&tr);
+                s_tm.resyncs++;
+                s_tm.resync_ms += ms;
+                if (ms > s_tm.resync_max) s_tm.resync_max = ms;
+                s_rhash_pending = 0;
+                return 1;
+            }
+            if (online_get_diag()) {
+                fprintf(stderr, "[netplay] transition %u: regions differ from the host's:", index);
+                for (k = 0; k < d && k < 8; k++) fprintf(stderr, " %s", netplay_session_region_name(diff[k]));
+                fprintf(stderr, "%s; fetching the host's copy%c", d > 8 ? " ..." : "", 10);
+                fflush(stderr);
+            }
+            {
+                uint8_t req[4];
+                memcpy(req, &index, 4);
+                while (s_tx.active) {                         /* the joiner's channel is normally idle */
+                    poll_network();
+                    if (s_state != NPL_INMATCH || s_peer_left) return 0;
+                    if (GetTickCount() - t0 > 10000) break;
+                    Sleep(1);
+                }
+                tx_begin(MSG_RESYNC_REQ, req, 4);
+            }
+            asked = 1;
+        }
         now = GetTickCount();
         if (now - t0 > 10000) { drop_peer("The other player stopped responding (resync)."); return 0; }
         if (now - t0 > 1000) s_stalling = 1;
