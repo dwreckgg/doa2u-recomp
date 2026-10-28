@@ -132,6 +132,7 @@ doa2u_host_test(online_settings_test ${ONLINE_DIR}/online_settings.c ${CMAKE_SOU
 doa2u_host_test(netplay_dump_test ${ONLINE_DIR}/netplay_dump.c ${CMAKE_SOURCE_DIR}/tests/netplay_dump_test.c)
 doa2u_host_test(netplay_memdiff ${ONLINE_DIR}/netplay_dump.c ${CMAKE_SOURCE_DIR}/tests/netplay_memdiff.c)
 doa2u_host_test(join_code_test ${ONLINE_DIR}/join_code.c ${CMAKE_SOURCE_DIR}/tests/join_code_test.c)
+doa2u_host_test(netplay_files_test ${ONLINE_DIR}/netplay_files.c ${CMAKE_SOURCE_DIR}/tests/netplay_files_test.c)
 doa2u_host_test(detmath_test ${CMAKE_SOURCE_DIR}/tests/detmath_test.c)
 target_link_libraries(detmath_test PRIVATE detmath)
 target_compile_options(detmath_test PRIVATE /FI${DETMATH_REDIRECT})   # compiled like the game code

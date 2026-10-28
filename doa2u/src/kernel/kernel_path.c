@@ -40,6 +40,8 @@ static void copy_dir_files(const WCHAR *from, const WCHAR *to)
 }
 
 /* The save root (UserData, TitleData and their _netplay session copies live here). */
+const WCHAR *xbox_path_game_dir(void) { return s_game_dir; }
+
 const WCHAR *xbox_path_save_dir(void)
 {
     if (!s_initialized) xbox_path_init(NULL, NULL);

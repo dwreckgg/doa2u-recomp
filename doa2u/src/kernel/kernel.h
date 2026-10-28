@@ -468,6 +468,7 @@ BOOL xbox_translate_path(const char* xbox_path, WCHAR* win_path_buf, DWORD buf_s
  * during the session reaches the player's real save files. */
 void xbox_path_set_title_redirect(int on);
 const wchar_t *xbox_path_save_dir(void);   /* the save root */
+const wchar_t *xbox_path_game_dir(void);   /* the game files (the disc's contents) */
 
 /* ============================================================================
  * Pool Allocator (kernel_pool.c)

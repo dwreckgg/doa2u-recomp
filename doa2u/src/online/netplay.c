@@ -32,6 +32,7 @@
 #include "ui/video_settings.h"
 #include "ui/profile_settings.h"
 #include "netplay_handoff.h"
+#include "netplay_files.h"
 #include "gekkonet.h"
 
 #ifndef SIO_UDP_CONNRESET
@@ -42,7 +43,7 @@ long d3d8_PresentHold(void);          /* d3d8_device.c: redraw the last frame + 
 extern volatile LONG g_doa2u_heartbeat;   /* the stall watchdog's frame counter (game) */
 void doa2u_pump_messages(void);       /* main.c */
 
-#define PROTO_VERSION      2u
+#define PROTO_VERSION      3u   /* 3: hello carries the game-files fingerprint */
 #define PK_MAGIC           0x32414F44u  /* "DOA2" */
 #define CHUNK_BYTES        1200
 #define MAX_CHUNKS         255          /* the save image alone is ~74 KB in DOA2U */
@@ -69,7 +70,7 @@ enum { LEAVE_LEFT = 0, LEAVE_CANCEL, LEAVE_DESYNC, LEAVE_MISMATCH, LEAVE_BADSTAR
 
 #pragma pack(push, 1)
 typedef struct { uint32_t magic; uint8_t type; uint8_t flags; uint16_t len; } pk_hdr;
-typedef struct { uint32_t proto, build; uint8_t layout[NP_LAYOUT_MAX]; uint8_t laysel; } pk_hello;
+typedef struct { uint32_t proto, build; uint8_t layout[NP_LAYOUT_MAX]; uint8_t laysel; uint64_t files; } pk_hello;
 typedef struct { uint32_t proto, build; uint8_t accept; char reason[96]; } pk_welcome;
 typedef struct { uint32_t t; uint8_t battle; } pk_ping;      /* battle: the host's choice, 0 Single 1 Tag */
 typedef struct { uint8_t tag; } pk_ready;
@@ -412,6 +413,27 @@ static void compare_digest(uint32_t frame, const uint32_t *theirs, int n)
     line[sizeof(line) - 1] = 0;
     set_event("%s", line);
     netplay_session_set_end_note(line);
+}
+
+/* The game files' fingerprint (netplay_files.c), worked out once; with diagnostic logs
+ * on, netplay_files.txt lists every file it counted, for comparing two PCs. */
+extern const wchar_t *xbox_path_game_dir(void);
+static uint64_t netplay_files_fp(void)
+{
+    static uint64_t fp;
+    static int done;
+    if (!done) {
+        const wchar_t *dir = xbox_path_game_dir();
+        FILE *lst;
+        if (!dir || !dir[0]) return 0;                  /* paths not set yet: try again later */
+        lst = online_get_diag() ? fopen("netplay_files.txt", "w") : NULL;
+        DWORD t0 = GetTickCount();
+        done = 1;
+        fp = np_files_fingerprint(dir, lst);
+        if (lst) fclose(lst);
+        fprintf(stderr, "[netplay] game files %08X (%lu ms)%c", (unsigned)fp, (unsigned long)(GetTickCount() - t0), 10);
+    }
+    return fp;
 }
 
 static int s_resume_delay;   /* the delay measured before the session's restart (hand-off) */
@@ -893,8 +915,9 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
     case PK_HELLO: {
         pk_hello hl;
         pk_welcome w;
-        if (blen < sizeof(hl) || !s_is_host || s_state == NPL_OFFLINE) return;
-        memcpy(&hl, body, sizeof(hl));
+        if (blen < 8 || !s_is_host || s_state == NPL_OFFLINE) return;   /* proto + build: any version */
+        memset(&hl, 0, sizeof(hl));
+        memcpy(&hl, body, blen < sizeof(hl) ? blen : sizeof(hl));
         memset(&w, 0, sizeof(w));
         w.proto = PROTO_VERSION;
         w.build = netplay_build_stamp();
@@ -911,6 +934,19 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
                       w.build, hl.build);
             send_raw(from, PK_WELCOME, &w, sizeof(w));
             set_event("Refused a player: different build (%08X, ours %08X).", hl.build, w.build);
+            return;
+        }
+        if (blen < sizeof(hl)) return;
+        if (hl.files != netplay_files_fp()) {
+            /* same build, different game files (another dump or a modded file): they
+             * would desync, so say so now; netplay_files.txt lists every file to compare */
+            w.accept = 0;
+            _snprintf(w.reason, sizeof(w.reason) - 1,
+                      "Different game files (host %08X, you %08X): compare netplay_files.txt.",
+                      (unsigned)netplay_files_fp(), (unsigned)hl.files);
+            send_raw(from, PK_WELCOME, &w, sizeof(w));
+            set_event("Refused a player: different game files (%08X, ours %08X).",
+                      (unsigned)hl.files, (unsigned)netplay_files_fp());
             return;
         }
         if (!s_have_peer) {
@@ -945,6 +981,7 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
             pk_hello hl;
             hl.proto = PROTO_VERSION;
             hl.build = netplay_build_stamp();
+            hl.files = netplay_files_fp();
             netplay_local_layout(hl.layout, &hl.laysel);
             send_raw(from, PK_HELLO, &hl, sizeof(hl));
         }
@@ -1107,6 +1144,7 @@ static void poll_network(void)
             pk_hello hl;
             hl.proto = PROTO_VERSION;
             hl.build = netplay_build_stamp();
+            hl.files = netplay_files_fp();
             netplay_local_layout(hl.layout, &hl.laysel);
             send_candidates(PK_HELLO, &hl, sizeof(hl));
             {   /* also call out on the local network (usual ports) */
@@ -2143,6 +2181,7 @@ void netplay_init(void)
     s_wsa = WSAStartup(MAKEWORD(2, 2), &wd) == 0;
     netplay_settings_load();
     netplay_build_stamp();   /* logs this build's identity, for comparing with the other player's */
+    netplay_files_fp();      /* and the game files' fingerprint */
 }
 
 void netplay_shutdown(void)
