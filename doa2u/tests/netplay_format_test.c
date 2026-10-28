@@ -33,20 +33,67 @@ static void test_rhash(void)
 }
 
 /* The identity two games compare before playing: the same commit built
- * cleanly anywhere matches; a modified tree or a build without git keeps the
- * per-link stamp, so it only matches the very same exe. */
+ * cleanly anywhere matches when the compiled code is the same; another
+ * compiler's code for the same commit does not (review L6: a different Visual
+ * Studio can round floats differently and desync). A modified tree or a build
+ * without git keeps the per-link stamp, so it only matches the very same exe. */
 static void test_build_id(void)
 {
     const char *a = "6c1d9c44238b6005ed8f54c46aeeaba5836464c7";
     const char *b = "ebb4ff8c6d05b9d5a0f4d1fe693219de6eba3174";
-    CHECK(np_build_id(a, 0, 0x6AE12D92u) == np_build_id(a, 0, 0x6AE12E17u));   /* two builds of one commit */
-    CHECK(np_build_id(a, 0, 1) != np_build_id(b, 0, 1));                        /* another commit */
-    CHECK(np_build_id(a, 1, 0x6AE12D92u) == 0x6AE12D92u);                       /* local edits: the link stamp */
-    CHECK(np_build_id(a, 1, 0x6AE12D92u) != np_build_id(a, 1, 0x6AE12E17u));
-    CHECK(np_build_id("", 0, 0x6AE12D92u) == 0x6AE12D92u);                      /* no git */
-    CHECK(np_build_id(NULL, 0, 0x6AE12D92u) == 0x6AE12D92u);
-    CHECK(np_build_id("abc", 0, 0x6AE12D92u) == 0x6AE12D92u);                   /* not a commit */
-    CHECK(np_build_id(a, 0, 1) != 0);
+    const uint32_t code = 0xC0DE1234u;
+    CHECK(np_build_id(a, 0, 0x6AE12D92u, code) == np_build_id(a, 0, 0x6AE12E17u, code));   /* two builds, one commit, same code */
+    CHECK(np_build_id(a, 0, 1, code) != np_build_id(a, 0, 1, code ^ 1));       /* same commit, other code */
+    CHECK(np_build_id(a, 0, 1, code) != np_build_id(b, 0, 1, code));           /* another commit */
+    CHECK(np_build_id(a, 1, 0x6AE12D92u, code) == 0x6AE12D92u);                /* local edits: the link stamp */
+    CHECK(np_build_id(a, 1, 0x6AE12D92u, code) != np_build_id(a, 1, 0x6AE12E17u, code));
+    CHECK(np_build_id("", 0, 0x6AE12D92u, code) == 0x6AE12D92u);               /* no git */
+    CHECK(np_build_id(NULL, 0, 0x6AE12D92u, code) == 0x6AE12D92u);
+    CHECK(np_build_id("abc", 0, 0x6AE12D92u, code) == 0x6AE12D92u);            /* not a commit */
+    CHECK(np_build_id(a, 0, 1, code) != 0);
+}
+
+/* The code hash is of the loaded image's .text section only: the data sections
+ * hold paths and stamps that differ between two builds of the same code (measured
+ * 2026-10-27: a separate clone, same compiler: .text identical, one .rdata byte
+ * different). A fake image: headers, .text at 0x1000, .rdata at 0x2000. */
+static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void put32le(uint8_t *p, uint32_t v) { put16(p, (uint16_t)v); put16(p + 2, (uint16_t)(v >> 16)); }
+
+static void fake_image(uint8_t *img)
+{
+    uint8_t *nt, *sec;
+    memset(img, 0, 0x3000);
+    img[0] = 'M'; img[1] = 'Z';
+    put32le(img + 0x3C, 0x80);                    /* e_lfanew */
+    nt = img + 0x80;
+    nt[0] = 'P'; nt[1] = 'E';
+    put16(nt + 4 + 2, 2);                         /* NumberOfSections */
+    put16(nt + 4 + 16, 0xF0);                     /* SizeOfOptionalHeader (PE32+) */
+    sec = nt + 4 + 20 + 0xF0;
+    memcpy(sec, ".rdata\0\0", 8);  put32le(sec + 8, 0x100);  put32le(sec + 12, 0x2000);
+    memcpy(sec + 40, ".text\0\0\0", 8); put32le(sec + 40 + 8, 0x180); put32le(sec + 40 + 12, 0x1000);
+    fill(img + 0x1000, 0x180, 3);                 /* code */
+    fill(img + 0x2000, 0x100, 9);                 /* read-only data */
+}
+
+static void test_code_hash(void)
+{
+    static uint8_t img[0x3000];
+    uint32_t h0, h;
+    fake_image(img);
+    h0 = np_code_hash(img);
+    CHECK(h0 != 0);
+    img[0x2010] ^= 1;                             /* a data byte: the same code */
+    CHECK(np_code_hash(img) == h0);
+    img[0x1000 + 0x17F] ^= 1;                     /* the last code byte */
+    h = np_code_hash(img);
+    CHECK(h != h0);
+    img[0x1000 + 0x17F] ^= 1;
+    img[0x1000 + 0x180] ^= 1;                     /* one past the section's size: not code */
+    CHECK(np_code_hash(img) == h0);
+    img[0x80] = 'X';                              /* not a PE image */
+    CHECK(np_code_hash(img) == 0);
 }
 
 /* Every field distinct and non-zero, so a swapped or dropped field shows. */
@@ -203,6 +250,7 @@ int main(void)
     test_blob();
     test_replay();
     test_build_id();
+    test_code_hash();
     test_rhash();
     printf("netplay_format_test: %d failure(s)\n", failures);
     return failures;

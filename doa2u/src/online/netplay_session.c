@@ -256,9 +256,10 @@ static void record_frame(const np_pad in[2])
 
 /* ── files ──────────────────────────────────────────────────────────── */
 
-/* Both games must run the same code: any clean build of the same doa2u
- * source tree matches (np_build_id.h, written by cmake/np_build_id.cmake);
- * a modified tree or a build without git only matches the very same exe. */
+/* Both games must run the same code: a clean build of the same doa2u source
+ * tree matches when its compiled code (.text) is the same too (np_build_id.h,
+ * written by cmake/np_build_id.cmake; another compiler version gives another
+ * id); a modified tree or a build without git only matches the very same exe. */
 static uint32_t build_stamp(void)
 {
     static uint32_t id;
@@ -266,10 +267,11 @@ static uint32_t build_stamp(void)
         const uint8_t *base = (const uint8_t *)GetModuleHandleW(NULL);
         const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
         const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
-        id = np_build_id(NP_BUILD_TREE, NP_BUILD_DIRTY, nt->FileHeader.TimeDateStamp);
-        fprintf(stderr, "[netplay] build %08X (%s)%c", id,
+        uint32_t code = np_code_hash(base);
+        id = np_build_id(NP_BUILD_TREE, NP_BUILD_DIRTY, nt->FileHeader.TimeDateStamp, code);
+        fprintf(stderr, "[netplay] build %08X (%s, code %08X)%c", id,
                 (NP_BUILD_DIRTY || !NP_BUILD_TREE[0]) ? "this exe only: local changes or no git"
-                                                      : "source tree " NP_BUILD_TREE, 10);
+                                                      : "source tree " NP_BUILD_TREE, code, 10);
     }
     return id;
 }

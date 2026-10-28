@@ -57,9 +57,13 @@ typedef struct {
 uint32_t np_fnv32(uint32_t h, const void *p, uint32_t len);
 
 /* The build identity two games compare before a session: derived from the
- * git commit when the tree was clean (any build of that commit matches),
- * else the exe's link stamp (only the very same exe matches). */
-uint32_t np_build_id(const char *commit, int dirty, uint32_t link_stamp);
+ * git commit and the compiled code when the tree was clean (a build of that
+ * commit matches when the compiler produced the same code), else the exe's
+ * link stamp (only the very same exe matches). */
+uint32_t np_build_id(const char *commit, int dirty, uint32_t link_stamp, uint32_t code_hash);
+/* The hash of a loaded PE image's .text section (`image` = its module base);
+ * 0 when it is not a PE image or has no .text. */
+uint32_t np_code_hash(const uint8_t *image);
 
 /* The screen-change check (netplay.c): the transition's index and one hash per
  * sync region. pack returns the length (0 when `cap` is short); unpack returns 1

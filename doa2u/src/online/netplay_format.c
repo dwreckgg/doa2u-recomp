@@ -42,7 +42,27 @@ int np_rhash_diff(const uint32_t *a, const uint32_t *b, uint32_t n, int *idx, in
     return d;
 }
 
-uint32_t np_build_id(const char *commit, int dirty, uint32_t link_stamp)
+static uint32_t rd16(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8); }
+static uint32_t rd32(const uint8_t *p) { return rd16(p) | (rd16(p + 2) << 16); }
+
+uint32_t np_code_hash(const uint8_t *image)
+{
+    const uint8_t *nt, *sec;
+    uint32_t nsec, i, h;
+    if (!image || image[0] != 'M' || image[1] != 'Z') return 0;
+    nt = image + rd32(image + 0x3C);
+    if (nt[0] != 'P' || nt[1] != 'E' || nt[2] || nt[3]) return 0;
+    nsec = rd16(nt + 4 + 2);
+    sec = nt + 4 + 20 + rd16(nt + 4 + 16);
+    for (i = 0; i < nsec; i++, sec += 40) {
+        if (memcmp(sec, ".text\0\0\0", 8)) continue;
+        h = np_fnv32(NP_FNV32_INIT, image + rd32(sec + 12), rd32(sec + 8));
+        return h ? h : 1u;
+    }
+    return 0;
+}
+
+uint32_t np_build_id(const char *commit, int dirty, uint32_t link_stamp, uint32_t code_hash)
 {
     uint32_t len = 0, id;
     if (!commit || dirty) return link_stamp;
@@ -53,6 +73,7 @@ uint32_t np_build_id(const char *commit, int dirty, uint32_t link_stamp)
     }
     if (len < 7) return link_stamp;
     id = np_fnv32(NP_FNV32_INIT, commit, len);
+    id = np_fnv32(id, &code_hash, sizeof code_hash);       /* the same commit, another compiler: another id */
     return id ? id : 1u;
 }
 

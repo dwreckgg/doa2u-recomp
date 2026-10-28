@@ -1109,7 +1109,7 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
         if (hl.proto != PROTO_VERSION || hl.build != netplay_build_stamp()) {
             w.accept = 0;
             _snprintf(w.reason, sizeof(w.reason) - 1,
-                      "Different build (host %08X, you %08X): build the same netplay commit, or use the host's exe.",
+                      "Different build (host %08X, you %08X): play with the host's exe.",   /* fits reason[96] */
                       w.build, hl.build);
             send_raw(from, PK_WELCOME, &w, sizeof(w));
             set_event("Refused a player: different build (%08X, ours %08X).", hl.build, w.build);
