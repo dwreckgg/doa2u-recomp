@@ -29,6 +29,8 @@
 #include "netplay_session.h"
 #include "net_upnp.h"
 #include "join_code.h"
+#include "ui/video_settings.h"
+#include "ui/profile_settings.h"
 #include "netplay_handoff.h"
 #include "gekkonet.h"
 
@@ -1710,12 +1712,20 @@ void netplay_restart_now(void)
     exe_dir_w(dir, MAX_PATH);
     memset(&si, 0, sizeof si);
     si.cb = sizeof si;
+    /* Let go of doa2u_log.txt first: the new process keeps it as doa2u_log.1.txt
+     * (log_rotate.c), which fails while this one still holds it open. */
+    fflush(stderr);
+    if (!freopen("NUL", "w", stderr)) { /* nothing more to log either way */ }
     if (CreateProcessW(exe, NULL, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi)) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         ExitProcess(0);
     }
-    set_event("Could not restart the game (error %lu).", (unsigned long)GetLastError());
+    {   /* still running: carry on logging where the log left off */
+        DWORD err = GetLastError();
+        if (!freopen("doa2u_log.txt", "a", stderr)) { /* logging stays off */ }
+        set_event("Could not restart the game (error %lu).", (unsigned long)err);
+    }
 }
 
 void netplay_boot_send(void)
@@ -1735,6 +1745,9 @@ void netplay_boot_send(void)
     s_boot_desc.seed = (uint32_t)(q.QuadPart >> 7) ^ ((uint32_t)rand() << 8) ^ 0x9E3779B9u;
     memcpy(s_boot_desc.joiner_layout, s_peer_layout, NP_LAYOUT_MAX);
     s_boot_desc.joiner_laysel = s_peer_laysel;
+    /* the settings the game itself reads: both games run with the host's */
+    s_boot_desc.host_language = (uint8_t)profile_get_language();
+    s_boot_desc.host_widescreen = video_xc_video_value() ? 1 : 0;
     s_boot_files_failed = 0;
     add_save_files(&s_boot_desc, "UserData");
     add_save_files(&s_boot_desc, "TitleData");
@@ -1925,6 +1938,15 @@ void netplay_resume_session(void)
         np_handoff_free(&h);
         return;
     }
+    /* The game reads its language and widescreen flag from this PC's settings;
+     * for the session both games use the host's (not saved: the offline game
+     * that follows the session reads this PC's own settings again). Window
+     * size, resolution and the rest stay each player's own. */
+    if (profile_get_language() != h.host_language) profile_set_language(h.host_language);
+    if ((video_xc_video_value() ? 1 : 0) != h.host_widescreen)
+        video_set_aspect(h.host_widescreen ? VIDEO_ASPECT_16_9 : VIDEO_ASPECT_4_3);
+    fprintf(stderr, "[NETPLAY] session settings from the host: language %u, %s%c",
+            (unsigned)h.host_language, h.host_widescreen ? "widescreen" : "4:3", 10);
     if (!write_session_files(&h)) {                      /* after the redirect's own copy */
         set_event("The host's save files could not be written into the session folder.");
         s_resume_failed = 1;                             /* the pump gives up and relaunches */

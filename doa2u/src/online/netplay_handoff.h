@@ -49,6 +49,8 @@ typedef struct {
     uint32_t seed;
     uint8_t  joiner_layout[NP_LAYOUT_MAX];       /* the joiner's button layout for port 1 */
     uint8_t  joiner_laysel;
+    uint8_t  host_language;                      /* the host's game language (profile_settings) */
+    uint8_t  host_widescreen;                    /* the host's widescreen flag: both games use it */
     uint32_t n_files;
     np_handoff_file files[NP_HANDOFF_MAX_FILES];
 } np_handoff;

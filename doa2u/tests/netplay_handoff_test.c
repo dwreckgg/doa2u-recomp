@@ -27,6 +27,8 @@ static void fill(np_handoff *h)
     h->seed = 0x1234ABCDu;
     for (i = 0; i < (int)NP_LAYOUT_MAX; i++) h->joiner_layout[i] = (uint8_t)(i * 3);
     h->joiner_laysel = 2;
+    h->host_language = 3;      /* the game-facing settings both sides must share */
+    h->host_widescreen = 0;
     CHECK(np_handoff_add_file(h, "UserData/1BD01AB4D3F6/ups.dat", ups, sizeof ups));
     CHECK(np_handoff_add_file(h, "UserData/1BD01AB4D3F6/SaveMeta.xbx", meta, sizeof meta));
     CHECK(np_handoff_add_file(h, "TitleData/empty.bin", NULL, 0));
@@ -49,6 +51,11 @@ static void test_round_trip(void)
     CHECK(b.local_port == 7001 && b.peer_port == 7000 && !memcmp(b.peer_ip, a.peer_ip, 4));
     CHECK(b.token == a.token && b.seed == a.seed);
     CHECK(!memcmp(b.joiner_layout, a.joiner_layout, NP_LAYOUT_MAX) && b.joiner_laysel == 2);
+    CHECK(b.host_language == 3 && b.host_widescreen == 0);
+    a.host_widescreen = 1;
+    CHECK(np_handoff_pack(&a, buf, need) == need);
+    np_handoff_free(&b);
+    CHECK(np_handoff_unpack(&b, buf, need) == NULL && b.host_widescreen == 1 && b.host_language == 3);
     CHECK(b.n_files == 3);
     CHECK(!strcmp(b.files[0].name, "UserData/1BD01AB4D3F6/ups.dat") && b.files[0].len == 5 &&
           !memcmp(b.files[0].data, a.files[0].data, 5));

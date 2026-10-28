@@ -2,7 +2,8 @@
  *
  * Layout (little-endian): "DNH1", version u16, build_stamp u32, role u8,
  * battle u8, delay u8, local_port u16, peer_ip[4], peer_port u16, token u32,
- * seed u32, joiner_layout[NP_LAYOUT_MAX], joiner_laysel u8, n_files u32, then
+ * seed u32, joiner_layout[NP_LAYOUT_MAX], joiner_laysel u8, host_language u8,
+ * host_widescreen u8, n_files u32, then
  * per file: name length u16, the name (no terminator), data length u32, the
  * data. Every length is checked before it is used, and the bytes must end
  * exactly where the last file does. */
@@ -11,7 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define HANDOFF_VERSION 1u
+#define HANDOFF_VERSION 2u   /* 2: the host's language and widescreen flag */
 
 static int comp_char_ok(char c)
 {
@@ -122,6 +123,8 @@ uint32_t np_handoff_pack(const np_handoff *h, uint8_t *dst, uint32_t cap)
         put32(&w, h->seed);
         put(&w, h->joiner_layout, NP_LAYOUT_MAX);
         put8(&w, h->joiner_laysel);
+        put8(&w, h->host_language);
+        put8(&w, h->host_widescreen);
         put32(&w, h->n_files);
         for (i = 0; i < h->n_files; i++) {
             uint16_t nl = (uint16_t)strlen(h->files[i].name);
@@ -181,6 +184,8 @@ const char *np_handoff_unpack(np_handoff *h, const uint8_t *src, uint32_t len)
     q = take(&r, NP_LAYOUT_MAX);
     if (q) memcpy(h->joiner_layout, q, NP_LAYOUT_MAX);
     h->joiner_laysel = get8(&r);
+    h->host_language = get8(&r);
+    h->host_widescreen = get8(&r);
     n = get32(&r);
     if (r.bad) return "the hand-off is cut short";
     if (h->role > NP_HANDOFF_ROLE_JOINER) return "an unknown role";
