@@ -37,9 +37,24 @@ set(GAME_SOURCES
     ${RECOMP_GEN_SOURCES}
 )
 
+# Deterministic math (third_party/detmath, musl via MK-3D-rollback, MIT): the game code's
+# sin/cos/tan/atan2/log/pow give the same bits on every PC, which lockstep online play needs.
+set(DETMATH_DIR ${CMAKE_SOURCE_DIR}/third_party/detmath)
+file(GLOB DETMATH_SOURCES ${DETMATH_DIR}/*.c)
+add_library(detmath STATIC ${DETMATH_SOURCES})
+target_include_directories(detmath PUBLIC ${DETMATH_DIR})
+if(MSVC)
+    target_compile_options(detmath PRIVATE /FI${DETMATH_DIR}/features.h /W0 /fp:precise)
+    set_property(TARGET detmath PROPERTY MSVC_RUNTIME_CHECKS "")
+endif()
+set(DETMATH_REDIRECT ${CMAKE_CURRENT_SOURCE_DIR}/detmath_redirect.h)
+set_source_files_properties(${RECOMP_GEN_SOURCES} recomp/recomp_manual.c
+    PROPERTIES COMPILE_OPTIONS "/FI${DETMATH_REDIRECT}")
+
 add_executable(doa2u ${GAME_SOURCES})
 
 target_link_libraries(doa2u PRIVATE
+    detmath
     xbox_kernel
     d3d8_compat
     dsound_compat
@@ -117,6 +132,11 @@ doa2u_host_test(online_settings_test ${ONLINE_DIR}/online_settings.c ${CMAKE_SOU
 doa2u_host_test(netplay_dump_test ${ONLINE_DIR}/netplay_dump.c ${CMAKE_SOURCE_DIR}/tests/netplay_dump_test.c)
 doa2u_host_test(netplay_memdiff ${ONLINE_DIR}/netplay_dump.c ${CMAKE_SOURCE_DIR}/tests/netplay_memdiff.c)
 doa2u_host_test(join_code_test ${ONLINE_DIR}/join_code.c ${CMAKE_SOURCE_DIR}/tests/join_code_test.c)
+doa2u_host_test(detmath_test ${CMAKE_SOURCE_DIR}/tests/detmath_test.c)
+target_link_libraries(detmath_test PRIVATE detmath)
+target_compile_options(detmath_test PRIVATE /FI${DETMATH_REDIRECT})   # compiled like the game code
+doa2u_host_test(detmath_pin_gen ${CMAKE_SOURCE_DIR}/tests/detmath_pin_gen.c)   # not a _test: prints the pins
+target_link_libraries(detmath_pin_gen PRIVATE detmath)
 doa2u_host_test(log_rotate_test ${CMAKE_SOURCE_DIR}/src/ui/log_rotate.c ${CMAKE_SOURCE_DIR}/tests/log_rotate_test.c)
 doa2u_host_test(netplay_handoff_test ${ONLINE_DIR}/netplay_handoff.c ${CMAKE_SOURCE_DIR}/tests/netplay_handoff_test.c)
 doa2u_host_test(netplay_session_test ${ONLINE_DIR}/netplay_session.c ${ONLINE_DIR}/netplay_format.c
