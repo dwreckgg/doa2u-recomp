@@ -27,3 +27,4 @@ void netplay_hook_note_rand(void) { netplay_note_rand(); }
 int netplay_hook_session_active(void) { return netplay_active(); }
 int netplay_hook_skip_movies(void) { return netplay_skip_movies(); }
 uint32_t netplay_hook_seed_va(void) { return netplay_seed_va(); }
+void netplay_hook_fpu_guard(void) { netplay_fpu_guard(); }

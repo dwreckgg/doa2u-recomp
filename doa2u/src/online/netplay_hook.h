@@ -22,6 +22,9 @@ void     netplay_hook_note_rand(void);
 int      netplay_hook_session_active(void);
 int      netplay_hook_skip_movies(void);      /* in a session the game's movie start returns at once */
 uint32_t netplay_hook_seed_va(void);
+/* After the host present (D3D11 and its driver run on the game thread): in a
+ * session, the game thread's SSE control word goes back to the default. */
+void     netplay_hook_fpu_guard(void);
 
 #ifdef __cplusplus
 }

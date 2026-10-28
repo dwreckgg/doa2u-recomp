@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
+#include <xmmintrin.h>
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); ++failures; } } while (0)
@@ -323,6 +324,49 @@ static void test_counters_in_digest(void)
     remove(name);
 }
 
+/* The SSE control word in a session (review L5): the recompiled game runs its
+ * float code on the host's MXCSR (the game's own ldmxcsr is not translated), so
+ * a host DLL that leaves flush-to-zero or denormals-are-zero set on the game
+ * thread - a driver, an overlay - changes the game's float results on that PC
+ * only. Every session frame starts from the default 0x1F80 and counts how
+ * often it had to put it back; outside a session the control word is not
+ * touched. */
+static void test_mxcsr_guard(void)
+{
+    unsigned keep = _mm_getcsr();
+    int i;
+    fake_game_reset();
+    reset_screens();
+    _mm_setcsr(0x9FC0u);                                          /* FTZ + DAZ, as a driver might leave it */
+    tick();                                                       /* no session */
+    CHECK(_mm_getcsr() == 0x9FC0u);
+    CHECK(netplay_session_mxcsr_resets() == 0);
+    CHECK(netplay_boot_begin(0x77u, NULL));
+    for (i = 0; i < 3; i++) { script(netplay_session_frame()); tick(); }
+    CHECK(_mm_getcsr() == 0x1F80u);                               /* frame 0 put it back */
+    CHECK(netplay_session_mxcsr_resets() == 1);
+    _mm_setcsr(0x1FA3u);                                          /* status flags only (inexact, invalid, denormal: */
+    script(netplay_session_frame());                              /* every float operation sets them, measured */
+    tick();                                                       /* 0x1FA0 on every frame in game): no change, */
+    CHECK(netplay_session_mxcsr_resets() == 1);                   /* no correction, no log line */
+    CHECK((_mm_getcsr() & 0xFFC0u) == 0x1F80u);
+    _mm_setcsr(0x1FC0u);                                          /* DAZ alone, mid-session */
+    script(netplay_session_frame());
+    tick();
+    CHECK(_mm_getcsr() == 0x1F80u);
+    CHECK(netplay_session_mxcsr_resets() == 2);
+    _mm_setcsr(0x9F80u);                                          /* after a host call (the Swap hook's guard) */
+    netplay_fpu_guard();
+    CHECK(_mm_getcsr() == 0x1F80u);
+    CHECK(netplay_session_mxcsr_resets() == 3);
+    netplay_set_armed(0, NP_ROLE_HOST);
+    tick();
+    _mm_setcsr(0x9F80u);
+    netplay_fpu_guard();                                          /* no session: untouched */
+    CHECK(_mm_getcsr() == 0x9F80u);
+    _mm_setcsr(keep);
+}
+
 static void test_ring(void)
 {
     uint32_t h[NP_MAX_REGIONS];
@@ -360,9 +404,11 @@ static int pv_barrier(int at_barrier, int tag)
 }
 
 static int s_exchange_fail;
+static unsigned s_exchange_mxcsr;   /* non-zero: the exchange's wait leaves this MXCSR (a driver in PresentHold) */
 static int pv_exchange(const np_pad *local, np_pad out[2])
 {
     if (s_exchange_fail) return 0;
+    if (s_exchange_mxcsr) _mm_setcsr(s_exchange_mxcsr);
     out[0] = *local;
     memset(&out[1], 0, sizeof out[1]);
     out[1].buttons = 0x4242;
@@ -481,6 +527,15 @@ static void test_boot_online(void)
     for (i = 0; i < 16; i++) CHECK(fg_mem(FG_FIGHTERS)[i] == (uint8_t)(0xA0 + i));   /* the host's regions */
     CHECK(fg_mem(FG_SAVE)[2] == 0x92);                            /* its own image, untouched */
     CHECK(fg.slot[1].buttons == 0x4242);                          /* pads from the exchange */
+    {   /* the exchange waits and presents the last frame (host D3D on the game
+         * thread); what it leaves in MXCSR is put back before the frame runs */
+        unsigned keep = _mm_getcsr();
+        s_exchange_mxcsr = 0x9FC0u;
+        tick();
+        CHECK(_mm_getcsr() == 0x1F80u);
+        s_exchange_mxcsr = 0;
+        _mm_setcsr(keep);
+    }
     for (i = 30; i < 40; i++) fg_mem(FG_SAVE)[i] = (uint8_t)(0x40 + i);   /* both load the host's profile */
     tick();
     CHECK(fg_mem(FG_SAVE)[26] == 1 && fg_mem(FG_SAVE)[27] == 7);  /* unlocked */
@@ -524,6 +579,7 @@ int main(void)
     test_record_and_replay();
     test_boot_session();
     test_counters_in_digest();
+    test_mxcsr_guard();
     test_boot_online();
     test_ring();
     test_provider();

@@ -674,6 +674,7 @@ void sub_0034AF80(void)
             pgraph_d3d11_flush();
             doa2u_present_frame();
         }
+        netplay_hook_fpu_guard();                   /* the driver ran on this thread */
         {   extern void doa2u_rdtsc_frame(void); doa2u_rdtsc_frame(); }   /* one vblank of rdtsc time */
         if (dev) {
             uint32_t ev = dev + DEV_VBLANK_EVENT_OFS;

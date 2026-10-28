@@ -1388,10 +1388,10 @@ static void tm_report(void)
     if (online_get_diag()) {
         fprintf(stderr, "[netplay] timing over %u frames: own frame avg %.1f ms (max %u), waited for the other "
                 "player %.0f ms total in %u frames (max %u), frames ahead %d..%d, resyncs %u (full copies %u, waited "
-                "%.0f ms, max %u, %u KB)%c",
+                "%.0f ms, max %u, %u KB), MXCSR corrections %u so far%c",
                 s_tm.frames, (double)s_tm.frame_ms / s_tm.frames, s_tm.frame_max, (double)s_tm.wait_ms, s_tm.waits,
                 s_tm.wait_max, s_tm.ahead_min, s_tm.ahead_max, s_tm.resyncs, s_tm.resync_full, (double)s_tm.resync_ms, s_tm.resync_max,
-                s_tm.resync_bytes / 1024u, 10);
+                s_tm.resync_bytes / 1024u, netplay_session_mxcsr_resets(), 10);
         fflush(stderr);
     }
     {

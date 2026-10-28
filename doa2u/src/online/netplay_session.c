@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <xmmintrin.h>
 #include "netplay_session.h"
 #include "netplay_format.h"
 #include "np_build_id.h"   /* generated: cmake/np_build_id.cmake */
@@ -83,6 +84,7 @@ static int       s_boot_armed;        /* clocks, chip and seeds in (frame 0 of a
 static int       s_boot_online, s_boot_battle;   /* restart-on-join: waits for the provider at frame 0 */
 static int     (*s_boot_pump)(void);
 static uint32_t  s_profile_hash;      /* boot sessions: the save image as last seen */
+static void      fpu_guard(const char *where);
 
 /* ── tables ─────────────────────────────────────────────────────────── */
 
@@ -776,6 +778,8 @@ void netplay_input_tick(void)
     }
 
 frame:
+    fpu_guard("at the frame start");                       /* says a change came from the game's own frame; the
+                                                            * guard after the exchange below would also catch it */
     if (s_boot && s_frame == 0 && !s_boot_armed) {
         /* Frame 0 of a boot session: the first frame-loop tick (the frame loop
          * starts about a second after launch, before the intro; the intro movies
@@ -859,6 +863,7 @@ frame:
     for (p = 2; p < 4; p++) np_game_pad_write(p, &none[0], 0);
     xbox_det_frame();
     mcpx_apu_det_frame();
+    fpu_guard("after the input exchange");                 /* its waits present the last frame (host D3D) */
     s_frame++;
 }
 
@@ -889,6 +894,28 @@ int netplay_skip_movies(void) { return s_state == NP_STATE_ACTIVE || s_boot; }
 void netplay_set_boot_pump(int (*pump)(void)) { s_boot_pump = pump; }
 uint32_t netplay_seed_va(void) { return s_state == NP_STATE_ACTIVE ? s_seed_va : 0; }
 
+/* The game thread's SSE control word (see the header). The default is what the
+ * game thread starts with on every PC; the game's own ldmxcsr (flush-to-zero at
+ * 0x2C748D, recomp_0015.c) is not translated, on any PC. */
+#define NP_MXCSR      0x1F80u
+#define NP_MXCSR_CTRL 0xFFC0u     /* FTZ, rounding, exception masks, DAZ; bits 0-5 are status flags
+                                   * every float operation sets (0x1FA0 on every frame in game) */
+static uint32_t s_mxcsr_resets;
+
+static void fpu_guard(const char *where)
+{
+    unsigned now = _mm_getcsr();
+    if ((now & NP_MXCSR_CTRL) == NP_MXCSR) return;
+    _mm_setcsr(NP_MXCSR);
+    if (++s_mxcsr_resets <= 8) {                          /* the first few, then only the count */
+        fprintf(stderr, "[netplay] MXCSR was %04X %s (frame %u), set back to %04X (%u so far)\n",
+                now, where, s_frame, NP_MXCSR, s_mxcsr_resets);
+        fflush(stderr);
+    }
+}
+
+void netplay_fpu_guard(void) { if (s_state == NP_STATE_ACTIVE) fpu_guard("after a host call"); }
+uint32_t netplay_session_mxcsr_resets(void) { return s_mxcsr_resets; }
 
 /* ── UI ─────────────────────────────────────────────────────────────── */
 

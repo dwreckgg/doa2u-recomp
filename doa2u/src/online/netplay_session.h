@@ -103,6 +103,13 @@ uint32_t netplay_filter_pad_mask(uint32_t host_mask); /* XGetDevices / XGetDevic
 uint32_t netplay_forced_pads(void);
 uint32_t netplay_session_frame(void);                 /* frames since the barrier */
 uint32_t netplay_seed_va(void);                       /* the game thread's rand() seed word, 0 outside a session */
+/* In a session the game thread's SSE control word is the default 0x1F80 at the
+ * start of every frame (and after the host present, netplay_fpu_guard): a host
+ * DLL that leaves flush-to-zero or denormals-are-zero set would change the
+ * game's float results on that PC only. Outside a session it is not touched.
+ * The count of corrections since launch is logged and reported. */
+void     netplay_fpu_guard(void);
+uint32_t netplay_session_mxcsr_resets(void);
 
 /* ── Remote input provider (netplay.c) ─────────────────────────────────
  * With a provider set, an armed session is an online one. Everything is
