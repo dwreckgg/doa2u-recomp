@@ -414,10 +414,14 @@ static void compare_digest(uint32_t frame, const uint32_t *theirs, int n)
     netplay_session_set_end_note(line);
 }
 
+static int s_resume_delay;   /* the delay measured before the session's restart (hand-off) */
 static int auto_delay(void)
 {
     int d;
-    if (!s_rtt_n) return 2;
+    /* No ping measured yet: right after the restart into a session, the
+     * reconnected games have not timed a round trip, so use the delay the
+     * lobby measured before the restart (else 2). */
+    if (!s_rtt_n) return s_resume_delay ? s_resume_delay : 2;
     d = (int)ceilf((s_rtt_avg * 0.5f) / 16.667f) + 1;
     if (d < 1) d = 1;
     if (d > 8) d = 8;
@@ -1952,6 +1956,7 @@ void netplay_resume_session(void)
         s_resume_failed = 1;                             /* the pump gives up and relaunches */
     }
     s_battle = h.battle;
+    s_resume_delay = h.delay;
     s_resume = 1;
     s_resume_t0 = GetTickCount();
     memcpy(ep.ip, h.peer_ip, 4);
