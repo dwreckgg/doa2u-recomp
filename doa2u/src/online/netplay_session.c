@@ -796,6 +796,9 @@ frame:
          * transition. */
         xbox_det_bases b;
         s_boot_armed = 1;
+        s_rand_game = s_rand_workers = 0;                  /* boot's draws are not the session's: a local boot
+                                                            * replay counts from before the entry point, an
+                                                            * online session only from here */
         if (s_replaying || s_boot_online) sync_write(s_params.sync);   /* a replay, or the host's (online) */
         else sync_read(s_params.sync);
         np_game_pad_history_clear();                      /* intro presses differ between machines */

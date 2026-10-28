@@ -322,6 +322,27 @@ static void test_counters_in_digest(void)
         CHECK(s.diverged_at == 10);
         CHECK(strstr(s.message, "DIVERGED at frame 10 (counters") != NULL);
     }
+    /* rand() calls the game makes while it boots, before frame 0, are not the
+     * session's: a local boot replay is active from before the entry point while
+     * an online session waits armed, so counting them made every replay of an
+     * online recording part at frame 0 in "counters" (measured: rand_game 54 vs 0,
+     * every later frame equal, 2026-10-28) */
+    {
+        int i;
+        fake_game_reset();
+        reset_screens();
+        g_kcalls = 0; g_apu_chip = 0;
+        CHECK(netplay_boot_begin(0, name));
+        for (i = 0; i < 54; i++) netplay_note_rand();           /* boot draws, before the first tick */
+        for (i = 0; i < 40 && st().state == NP_STATE_ACTIVE; i++) {
+            g_kcalls += 7; g_apu_chip += 25;
+            script(netplay_session_frame());
+            tick();
+        }
+        s = st();
+        if (strncmp(s.message, "Replay matched", 14)) fprintf(stderr, "boot draws: %s\n", s.message);
+        CHECK(strncmp(s.message, "Replay matched the recording for all", 36) == 0);
+    }
     remove(name);
 }
 
