@@ -17,11 +17,80 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n)
     return h;
 }
 
-/* Left out: the files the PC writes into the game folder itself. */
+/* Left out: the files the PC writes into the game folder itself, and the Xbox dashboard
+ * updaters, which the game never runs and many dumps blank. */
 static int skipped(const wchar_t *name)
 {
     return _wcsnicmp(name, L"doa2u_", 6) == 0 || _wcsicmp(name, L"desktop.ini") == 0 ||
-           _wcsicmp(name, L"thumbs.db") == 0;
+           _wcsicmp(name, L"thumbs.db") == 0 || _wcsicmp(name, L"dashupdate.xbe") == 0 ||
+           _wcsicmp(name, L"update.xbe") == 0;
+}
+
+static int read_at(HANDLE h, uint64_t off, void *dst, DWORD len, DWORD *got)
+{
+    LARGE_INTEGER pos;
+    pos.QuadPart = (LONGLONG)off;
+    *got = 0;
+    return SetFilePointerEx(h, pos, NULL, FILE_BEGIN) && ReadFile(h, dst, len, got, NULL);
+}
+
+/* Samples of bytes [start, start + len): 64 KB at every 16 MB and the last 64 KB,
+ * each with its offset from `start`. */
+static uint64_t range_hash(HANDLE h, uint64_t hash, uint64_t start, uint64_t len, unsigned char *buf)
+{
+    uint64_t at;
+    for (at = 0;; at += FP_STRIDE) {
+        uint64_t off = at;
+        int last = 0;
+        DWORD got;
+        if (off + FP_SAMPLE >= len) {                        /* the end: the last 64 KB */
+            off = len > FP_SAMPLE ? len - FP_SAMPLE : 0;
+            last = 1;
+        }
+        if (!read_at(h, start + off, buf, (DWORD)(len - off < FP_SAMPLE ? len - off : FP_SAMPLE), &got)) break;
+        hash = fnv(hash, &off, sizeof off);
+        hash = fnv(hash, buf, got);
+        if (last) break;
+    }
+    return hash;
+}
+
+/* An Xbox program (.xbe): its title ID and version from the certificate and the raw
+ * data of every section count, not the rest of the header. Extraction tools patch
+ * header fields (the allowed media) and the signature changes with them, while the
+ * code and data the game runs stay the same. 0 when the file is not a usable XBE. */
+static int xbe_hash(HANDLE h, uint64_t size, unsigned char *buf, uint64_t *out)
+{
+    uint32_t base, hsize, cert, nsec, shdr, tid, ver, i;
+    DWORD got;
+    uint64_t hash = FNV64_INIT;
+    if (!read_at(h, 0, buf, FP_SAMPLE, &got) || got < 0x180 || memcmp(buf, "XBEH", 4)) return 0;
+    memcpy(&base, buf + 0x104, 4);
+    memcpy(&hsize, buf + 0x108, 4);
+    memcpy(&cert, buf + 0x118, 4);
+    memcpy(&nsec, buf + 0x11C, 4);
+    memcpy(&shdr, buf + 0x120, 4);
+    if (hsize > got || nsec == 0 || nsec > 64 || cert < base || shdr < base ||
+        cert - base + 0xB0 > hsize || shdr - base + 56u * nsec > hsize)
+        return 0;
+    memcpy(&tid, buf + (cert - base) + 0x08, 4);
+    memcpy(&ver, buf + (cert - base) + 0xAC, 4);
+    hash = fnv(hash, &tid, 4);
+    hash = fnv(hash, &ver, 4);
+    {   /* the section table is read before `buf` is reused for the sections */
+        uint32_t raw[64][2];
+        for (i = 0; i < nsec; i++) {
+            memcpy(&raw[i][0], buf + (shdr - base) + 56u * i + 0x0C, 4);
+            memcpy(&raw[i][1], buf + (shdr - base) + 56u * i + 0x10, 4);
+            if ((uint64_t)raw[i][0] + raw[i][1] > size) return 0;
+        }
+        for (i = 0; i < nsec; i++) {
+            hash = fnv(hash, &raw[i][1], 4);
+            if (raw[i][1]) hash = range_hash(h, hash, raw[i][0], raw[i][1], buf);
+        }
+    }
+    *out = hash;
+    return 1;
 }
 
 /* The sampled content of one file, with its size. */
@@ -31,32 +100,16 @@ static uint64_t file_hash(const wchar_t *path, uint64_t *size_out)
                            FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     LARGE_INTEGER size;
     unsigned char *buf;
-    uint64_t hash = FNV64_INIT, at;
+    uint64_t hash = 0;
+    size_t n = wcslen(path);
     *size_out = 0;
     if (h == INVALID_HANDLE_VALUE) return 0;
     if (!GetFileSizeEx(h, &size)) { CloseHandle(h); return 0; }
     *size_out = (uint64_t)size.QuadPart;
     buf = (unsigned char *)malloc(FP_SAMPLE);
     if (!buf) { CloseHandle(h); return 0; }
-    for (at = 0;; at += FP_STRIDE) {
-        uint64_t off = at;
-        int last = 0;
-        if (off + FP_SAMPLE >= *size_out) {                  /* the end: the last 64 KB */
-            off = *size_out > FP_SAMPLE ? *size_out - FP_SAMPLE : 0;
-            last = 1;
-        }
-        {
-            LARGE_INTEGER pos;
-            DWORD got = 0;
-            pos.QuadPart = (LONGLONG)off;
-            if (!SetFilePointerEx(h, pos, NULL, FILE_BEGIN) ||
-                !ReadFile(h, buf, (DWORD)(*size_out - off < FP_SAMPLE ? *size_out - off : FP_SAMPLE), &got, NULL))
-                break;
-            hash = fnv(hash, &off, sizeof off);
-            hash = fnv(hash, buf, got);
-        }
-        if (last) break;
-    }
+    if (!(n > 4 && !_wcsicmp(path + n - 4, L".xbe") && xbe_hash(h, *size_out, buf, &hash)))
+        hash = range_hash(h, FNV64_INIT, 0, *size_out, buf);
     free(buf);
     CloseHandle(h);
     return hash;

@@ -31,6 +31,41 @@ static void poke(const wchar_t *root, const wchar_t *rel, long at, unsigned char
     if (f) { fseek(f, at, SEEK_SET); fputc(v, f); fclose(f); }
 }
 
+/* A small XBE: header with a certificate (title ID, allowed media, version) and two
+ * sections of 4 KB; `sig` fills the signature, `code` changes one section byte. */
+static void put_xbe(const wchar_t *root, uint32_t media, unsigned sig, uint32_t version, int code)
+{
+    unsigned char x[0x3000];
+    wchar_t p[MAX_PATH];
+    uint32_t base = 0x10000, v;
+    int i;
+    FILE *f;
+    memset(x, 0, sizeof x);
+    memcpy(x, "XBEH", 4);
+    for (i = 4; i < 0x104; i++) x[i] = (unsigned char)(i * 7u + sig);
+    v = base;          memcpy(x + 0x104, &v, 4);
+    v = 0x1000;        memcpy(x + 0x108, &v, 4);   /* header size */
+    v = 0x3000;        memcpy(x + 0x10C, &v, 4);
+    v = base + 0x200;  memcpy(x + 0x118, &v, 4);   /* certificate */
+    v = 2;             memcpy(x + 0x11C, &v, 4);   /* sections */
+    v = base + 0x300;  memcpy(x + 0x120, &v, 4);   /* section headers */
+    v = 0x54430006u;   memcpy(x + 0x200 + 0x08, &v, 4);
+    memcpy(x + 0x200 + 0x9C, &media, 4);
+    memcpy(x + 0x200 + 0xAC, &version, 4);
+    for (i = 0; i < 2; i++) {
+        unsigned char *h = x + 0x300 + 56 * i;
+        v = 0x11000u + 0x1000u * (uint32_t)i; memcpy(h + 0x04, &v, 4);   /* virtual address */
+        v = 0x1000;                           memcpy(h + 0x08, &v, 4);
+        v = 0x1000u + 0x1000u * (uint32_t)i;  memcpy(h + 0x0C, &v, 4);   /* raw address */
+        v = 0x1000;                           memcpy(h + 0x10, &v, 4);   /* raw size */
+    }
+    for (i = 0x1000; i < 0x3000; i++) x[i] = (unsigned char)(i * 13u);
+    if (code) x[0x2345] ^= 0x5A;
+    swprintf_s(p, MAX_PATH, L"%s\\doa2.xbe", root);
+    f = _wfopen(p, L"wb");
+    if (f) { fwrite(x, 1, sizeof x, f); fclose(f); }
+}
+
 static void tree(const wchar_t *root, int reverse)
 {
     wchar_t p[MAX_PATH];
@@ -127,6 +162,36 @@ int main(void)
         fclose(lst);
         _wremove(p);
         CHECK(n == 3 && !cache && voice);
+    }
+
+    /* .xbe files: their code and data sections, title ID and version count; the header
+     * fields extraction tools patch (allowed media) and the signature do not */
+    {
+        wchar_t c[MAX_PATH];
+        uint64_t x0;
+        swprintf_s(c, MAX_PATH, L"%sdoa2u_fp_x_%lu", tmp, GetCurrentProcessId());
+        CreateDirectoryW(c, NULL);
+        put_xbe(c, 0x00000002u, 1, 6, 0);
+        x0 = np_files_fingerprint(c, NULL);
+        put_xbe(c, 0x400001FFu, 2, 6, 0);                 /* media-patched, other signature */
+        CHECK(np_files_fingerprint(c, NULL) == x0);
+        put_xbe(c, 0x00000002u, 1, 6, 1);                 /* a byte of its code differs */
+        CHECK(np_files_fingerprint(c, NULL) != x0);
+        put_xbe(c, 0x00000002u, 1, 7, 0);                 /* another version */
+        CHECK(np_files_fingerprint(c, NULL) != x0);
+        put(c, L"doa2.xbe", 3000, 4);                      /* not an XBE inside: counted like any file */
+        CHECK(np_files_fingerprint(c, NULL) != 0);
+        /* the dashboard updaters (never run by the game; many dumps blank them): not counted */
+        x0 = np_files_fingerprint(c, NULL);
+        put(c, L"dashupdate.xbe", 5000, 1);
+        put(c, L"update.xbe", 7000, 2);
+        CHECK(np_files_fingerprint(c, NULL) == x0);
+        put(c, L"DashUpdate.xbe", 5001, 9);
+        CHECK(np_files_fingerprint(c, NULL) == x0);
+        swprintf_s(p, MAX_PATH, L"%s\\dashupdate.xbe", c); DeleteFileW(p);
+        swprintf_s(p, MAX_PATH, L"%s\\update.xbe", c); DeleteFileW(p);
+        swprintf_s(p, MAX_PATH, L"%s\\doa2.xbe", c); DeleteFileW(p);
+        RemoveDirectoryW(c);
     }
 
     /* nothing there: 0 */
