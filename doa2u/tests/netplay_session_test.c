@@ -5,6 +5,7 @@
 #include "online/netplay_session.h"
 #include "fake_game.h"
 #include "netplay_stubs.h"
+#include "online/online_settings.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -573,6 +574,94 @@ static void test_boot_online(void)
     netplay_set_boot_pump(NULL);
 }
 
+/* With diagnostic logs on, an online session keeps its own record however it
+ * ends (review L1): the digest log and a replay, written by each side at the
+ * end, without anyone ticking Record. The other PC can then replay this side's
+ * session from boot, with no network, and the replay names the first frame and
+ * region where that PC's game differs. With diagnostics off nothing is written. */
+static int count_files(const char *pattern)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    int n = 0;
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do n++; while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+static void online_session_until_it_fails(int diag)
+{
+    static const np_provider pv = { pv_barrier, pv_exchange, pv_digest, pv_end, pv_transition };
+    uint8_t joiner_layout[NP_LAYOUT_MAX] = { 1, 2, 3, 4 };
+    const uint8_t *blob;
+    uint32_t len;
+    int i;
+    online_set_diag(diag);
+    fake_game_reset();
+    CHECK(netplay_params_capture(&blob, &len, joiner_layout, 0));
+    memcpy(s_blob, blob, len);
+    s_blob_len = len;
+    fake_game_reset();
+    reset_screens();
+    netplay_set_provider(NULL);
+    s_pump_calls = 0; s_pump_fail = 0; s_pump_provider = &pv;
+    netplay_set_boot_pump(fake_pump);
+    CHECK(netplay_boot_online(NP_ROLE_JOINER, 0));
+    for (i = 0; i < 20; i++) { script(netplay_session_frame()); tick(); }
+    CHECK(st().state == NP_STATE_ACTIVE);
+    s_exchange_fail = 1;                                          /* a desync or a lost peer */
+    tick();
+    CHECK(st().state == NP_STATE_OFF);
+    s_exchange_fail = 0;
+    netplay_set_provider(NULL);
+    netplay_set_boot_pump(NULL);
+    online_set_diag(0);
+}
+
+static void remove_files(const char *pattern)
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do DeleteFileA(fd.cFileName); while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+static void test_online_keeps_its_record(void)
+{
+    char name[128];
+    int d0, r0;
+    /* the names carry the time to the second: start from none, so a file written
+     * in the same second as an earlier one cannot hide behind its name */
+    remove_files("netplay_replay_*.dnr");
+    remove_files("netplay_digest_*.txt");
+    d0 = count_files("netplay_digest_*.txt");
+    r0 = count_files("netplay_replay_*.dnr");
+    CHECK(d0 == 0 && r0 == 0);
+    online_session_until_it_fails(0);
+    CHECK(count_files("netplay_replay_*.dnr") == r0);             /* diagnostics off: nothing */
+    CHECK(count_files("netplay_digest_*.txt") == d0);
+    online_session_until_it_fails(1);
+    CHECK(count_files("netplay_replay_*.dnr") == r0 + 1);
+    CHECK(count_files("netplay_digest_*.txt") == d0 + 1);
+    if (find_replay(name, sizeof name)) {
+        np_replay r;
+        FILE *f = fopen(name, "rb");
+        const char *err;
+        memset(&r, 0, sizeof r);                                  /* np_replay_read frees what r holds first */
+        err = np_replay_read(f, &r, FG_SAVE_LEN, 24, (uint32_t)netplay_session_region_count());
+        if (f) fclose(f);
+        CHECK(err == NULL);
+        CHECK(!err && r.role == NP_ROLE_JOINER && r.frames >= 20);
+        if (!err) {
+            CHECK(r.pads[2 * 5 + 1].buttons == 0x4242);          /* the joiner's pads as exchanged */
+            np_replay_free(&r);
+        }
+        remove(name);
+    }
+}
+
 int main(void)
 {
     test_barrier_and_mirror();
@@ -581,6 +670,7 @@ int main(void)
     test_counters_in_digest();
     test_mxcsr_guard();
     test_boot_online();
+    test_online_keeps_its_record();
     test_ring();
     test_provider();
     {   /* digest logs written by the replays */

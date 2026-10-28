@@ -458,6 +458,11 @@ static void mirror_pair(np_pad in[2])
 
 static void end_session(const char *why)
 {
+    /* An online session with diagnostic logs on keeps its own record however it
+     * ends (a desync, a lost player, a disarm): the digest log and a replay, so the
+     * other PC can replay this side's session from boot without the network and
+     * see where its game parts from it (review L1). */
+    int keep_record = s_boot_online && s_keep_all && online_get_diag();
     if (online_get_diag())
         fprintf(stderr, "[netplay] session ended at frame %u (%s), screen key %08X\n", s_frame, why, np_game_screen_key());
     mcpx_apu_det_end();
@@ -467,7 +472,7 @@ static void end_session(const char *why)
         np_game_title_redirect(0);
         s_have_backup = 0;
     }
-    if (s_keep_all && (s_record || s_replaying || (s_end_note[0] && online_get_diag()))) write_log();
+    if (s_keep_all && (s_record || s_replaying || keep_record || (s_end_note[0] && online_get_diag()))) write_log();
     else s_end_note[0] = 0;
     if (s_replaying) {
         if (s_div_frame == NP_NO_FRAME)
@@ -479,7 +484,7 @@ static void end_session(const char *why)
         s_armed = 0;                                       /* a replay runs once */
         np_replay_free(&s_rp);
         s_rp_loaded = 0;
-    } else if (s_record) {
+    } else if (s_record || keep_record) {
         write_replay();
         _snprintf(s_msg, sizeof(s_msg) - 1, "Recorded %s", s_last_replay[0] ? s_last_replay : "(write failed)");
     }
