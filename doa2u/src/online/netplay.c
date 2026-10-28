@@ -1325,10 +1325,57 @@ static int pv_barrier(int at_barrier, int tag)
     return 1;
 }
 
+/* Session timing for the log (diagnostic logs on): every 600 frames, how long this
+ * PC's own frames took between exchanges (the game's work and its pacing), how long
+ * it waited for the other player's input, and what the screen-change resyncs cost.
+ * Which of them is large says whether a slow session is this PC, the other one or
+ * the network. */
+static struct {
+    uint32_t frames, waits, wait_max, frame_max, resyncs, resync_max, resync_bytes;
+    uint64_t wait_ms, frame_ms, resync_ms;
+    int      ahead_min, ahead_max;
+    LARGE_INTEGER last_end;
+} s_tm;
+
+static uint32_t tm_ms_since(const LARGE_INTEGER *t)
+{
+    static LARGE_INTEGER f;
+    LARGE_INTEGER now;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&now);
+    return (uint32_t)((now.QuadPart - t->QuadPart) * 1000 / f.QuadPart);
+}
+
+static void tm_report(void)
+{
+    if (!s_tm.frames) return;
+    if (online_get_diag()) {
+        fprintf(stderr, "[netplay] timing over %u frames: own frame avg %.1f ms (max %u), waited for the other "
+                "player %.0f ms total in %u frames (max %u), frames ahead %d..%d, resyncs %u (waited %.0f ms, "
+                "max %u, %u KB)%c",
+                s_tm.frames, (double)s_tm.frame_ms / s_tm.frames, s_tm.frame_max, (double)s_tm.wait_ms, s_tm.waits,
+                s_tm.wait_max, s_tm.ahead_min, s_tm.ahead_max, s_tm.resyncs, (double)s_tm.resync_ms, s_tm.resync_max,
+                s_tm.resync_bytes / 1024u, 10);
+        fflush(stderr);
+    }
+    {
+        LARGE_INTEGER keep = s_tm.last_end;
+        memset(&s_tm, 0, sizeof s_tm);
+        s_tm.last_end = keep;
+    }
+}
+
 static int pv_exchange(const np_pad *local, np_pad out[2])
 {
     DWORD t0 = GetTickCount(), last_present = t0;
     int got = 0;
+    LARGE_INTEGER tw;
+    QueryPerformanceCounter(&tw);
+    if (s_tm.last_end.QuadPart) {                        /* this PC's own frame since the last exchange */
+        uint32_t ms = tm_ms_since(&s_tm.last_end);
+        s_tm.frame_ms += ms;
+        if (ms > s_tm.frame_max) s_tm.frame_max = ms;
+    }
 
     if (!s_gk || s_state != NPL_INMATCH) return 0;
     s_in_exchange = 1;
@@ -1373,7 +1420,18 @@ static int pv_exchange(const np_pad *local, np_pad out[2])
         if (!gk_session_events()) break;
         if (s_peer_left) break;
         if (got) {
+            uint32_t waited = tm_ms_since(&tw);
+            int ahead;
             s_frames_ahead = gekko_frames_ahead(s_gk);
+            ahead = (int)s_frames_ahead;
+            if (!s_tm.frames || ahead < s_tm.ahead_min) s_tm.ahead_min = ahead;
+            if (!s_tm.frames || ahead > s_tm.ahead_max) s_tm.ahead_max = ahead;
+            s_tm.frames++;
+            s_tm.wait_ms += waited;
+            if (waited >= 2) s_tm.waits++;
+            if (waited > s_tm.wait_max) s_tm.wait_max = waited;
+            QueryPerformanceCounter(&s_tm.last_end);
+            if (s_tm.frames >= 600) tm_report();
             s_stalling = 0;
             s_in_exchange = 0;
             return 1;
@@ -1411,6 +1469,8 @@ static void pv_digest(uint32_t frame, uint64_t digest)
 
 static void pv_end(void)
 {
+    tm_report();                                         /* the last, partial window */
+    memset(&s_tm, 0, sizeof s_tm);                       /* the next session starts afresh */
     if (s_resume) {
         /* The online session is over (a desync, a lost player, a disarm). This
          * process runs on the host's profile with saves aside: start the game
@@ -1475,6 +1535,8 @@ static void pv_end(void)
 static int pv_transition(uint32_t index)
 {
     DWORD t0 = GetTickCount(), last_present = t0;
+    LARGE_INTEGER tr;
+    QueryPerformanceCounter(&tr);
     if (s_state != NPL_INMATCH) return 1;
     if (s_is_host) {
         const uint8_t *blob;
@@ -1496,6 +1558,13 @@ static int pv_transition(uint32_t index)
         memcpy(msg + 4, blob, len);
         tx_begin(MSG_RESYNC, msg, len + 4);
         free(msg);
+        {   /* the host waits only for the previous resync to finish */
+            uint32_t ms = tm_ms_since(&tr);
+            s_tm.resyncs++;
+            s_tm.resync_ms += ms;
+            if (ms > s_tm.resync_max) s_tm.resync_max = ms;
+            s_tm.resync_bytes += len;
+        }
         return 1;
     }
     for (;;) {
@@ -1504,6 +1573,11 @@ static int pv_transition(uint32_t index)
         if (s_state != NPL_INMATCH || s_peer_left) return 0;
         if (s_resync_pending && s_resync_index == index) {
             int ok = netplay_sync_apply(s_resync_blob, s_resync_len);
+            uint32_t ms = tm_ms_since(&tr);
+            s_tm.resyncs++;
+            s_tm.resync_ms += ms;
+            if (ms > s_tm.resync_max) s_tm.resync_max = ms;
+            s_tm.resync_bytes += s_resync_len;
             s_resync_pending = 0;
             if (!ok) set_event("Transition resync %u had the wrong size (different build?).", index);
             return 1;

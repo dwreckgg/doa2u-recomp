@@ -307,14 +307,38 @@ static __forceinline xmm128_t xmm_movhlps(xmm128_t a, xmm128_t b) {
 static __forceinline xmm128_t xmm_sqrtps(xmm128_t a) {
     int _i; for (_i = 0; _i < 4; _i++) a.f[_i] = sqrtf(a.f[_i]); return a;
 }
+/* RCPSS/RSQRTSS/RCPPS/RSQRTPS. The hardware's approximations differ between processor
+ * makes and generations, which online play between two PCs cannot have (both games
+ * must compute the same bits): computed exactly instead, since IEEE division and
+ * square root are the same on every PC, with the hardware's edges (a denormal or
+ * zero input counts as zero and gives a signed infinity, a denormal result flushes
+ * to a signed zero). More precise than the 12-bit approximations. */
+static __forceinline float xmm_bits_f(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+static __forceinline uint32_t xmm_f_bits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+static __forceinline float xmm_rcpss(float v) {
+    uint32_t u = xmm_f_bits(v);
+    float r;
+    if ((u & 0x7F800000u) == 0) return xmm_bits_f((u & 0x80000000u) | 0x7F800000u);
+    r = 1.0f / v;
+    u = xmm_f_bits(r);
+    if ((u & 0x7F800000u) == 0) return xmm_bits_f(u & 0x80000000u);
+    return r;
+}
+static __forceinline float xmm_rsqrtss(float v) {
+    uint32_t u = xmm_f_bits(v);
+    float r;
+    if ((u & 0x7F800000u) == 0) return xmm_bits_f((u & 0x80000000u) | 0x7F800000u);
+    r = 1.0f / sqrtf(v);                     /* a negative input gives the default NaN, as the hardware does */
+    u = xmm_f_bits(r);
+    if ((u & 0x7F800000u) == 0) return xmm_bits_f(u & 0x80000000u);
+    return r;
+}
 static __forceinline xmm128_t xmm_rsqrtps(xmm128_t a) {
-    _mm_storeu_ps(a.f, _mm_rsqrt_ps(_mm_loadu_ps(a.f))); return a;
+    int _i; for (_i = 0; _i < 4; _i++) a.f[_i] = xmm_rsqrtss(a.f[_i]); return a;
 }
 static __forceinline xmm128_t xmm_rcpps(xmm128_t a) {
-    _mm_storeu_ps(a.f, _mm_rcp_ps(_mm_loadu_ps(a.f))); return a;
+    int _i; for (_i = 0; _i < 4; _i++) a.f[_i] = xmm_rcpss(a.f[_i]); return a;
 }
-static __forceinline float xmm_rcpss(float v) { return _mm_cvtss_f32(_mm_rcp_ss(_mm_set_ss(v))); }
-static __forceinline float xmm_rsqrtss(float v) { return _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(v))); }
 static __forceinline uint32_t xmm_movmskps(xmm128_t a) {
     return (a.u[0] >> 31) | ((a.u[1] >> 31) << 1) | ((a.u[2] >> 31) << 2) | ((a.u[3] >> 31) << 3);
 }
