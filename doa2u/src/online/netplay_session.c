@@ -22,6 +22,7 @@ void     mcpx_apu_det_begin(uint64_t xgscnt_base);   /* apu_core.c: chip stepped
 uint64_t mcpx_apu_xgscnt_now(void);
 void     mcpx_apu_det_end(void);
 void     mcpx_apu_det_frame(void);
+uint64_t mcpx_apu_det_chip_frames(void);           /* chip frames stepped this session */
 
 #define BARRIER_QUIET_FRAMES 10      /* no guest file activity for this long at character select */
 #define REC_RING             256u    /* frames kept when not recording */
@@ -34,6 +35,7 @@ typedef struct {
     uint32_t screen;
     uint32_t kcalls, boost;
     uint16_t rand_game, rand_workers;
+    uint32_t apu_chip;
 } np_frame_rec;
 
 static volatile int s_armed, s_mirror, s_record;
@@ -84,10 +86,18 @@ static uint32_t  s_profile_hash;      /* boot sessions: the save image as last s
 
 /* ── tables ─────────────────────────────────────────────────────────── */
 
+/* The hashes of one frame: the sync regions, the extra regions, then two of
+ * the session's own: "seedclock" (the rand seed word and the session clocks)
+ * and "counters" (this frame's game-thread rand() calls, the guest kernel calls
+ * so far and the audio chip frames stepped so far: two machines that ran
+ * different guest code, or stepped the chip differently, part here at once,
+ * before any hashed memory need differ). */
+#define N_OWN_HASHES 2
+
 static int n_hash(void)
 {
     const np_game_desc *g = np_game();
-    return g->n_sync + g->n_extra + 1;
+    return g->n_sync + g->n_extra + N_OWN_HASHES;
 }
 
 static int tables_ok(void)
@@ -126,7 +136,8 @@ static const char *region_name(int k)
     if (k < 0) return "?";
     if (k < g->n_sync) return g->sync[k].name;
     if (k < g->n_sync + g->n_extra) return g->extra[k - g->n_sync].name;
-    return "seedclock";
+    if (k == g->n_sync + g->n_extra) return "seedclock";
+    return "counters";
 }
 
 static uint32_t region_hash(const np_region *r)
@@ -216,7 +227,17 @@ static void record_frame(const np_pad in[2])
         if (s_seed_va) np_game_read(s_seed_va, &v[0], 4);   /* every frame: the menus draw from it too */
         v[1] = xbox_det_tick_ms();
         v[2] = (uint32_t)xbox_det_filetime();
-        r->region[nh - 1] = np_fnv32(NP_FNV32_INIT, v, sizeof v);
+        r->region[nh - 2] = np_fnv32(NP_FNV32_INIT, v, sizeof v);
+    }
+    {
+        uint64_t chip = mcpx_apu_det_chip_frames();
+        uint32_t c[4];
+        c[0] = s_rand_game;
+        c[1] = xbox_det_kcalls();
+        c[2] = (uint32_t)chip;
+        c[3] = (uint32_t)(chip >> 32);
+        r->region[nh - 1] = np_fnv32(NP_FNV32_INIT, c, sizeof c);
+        r->apu_chip = (uint32_t)chip;
     }
     r->digest = np_digest_combine(r->region, nh);
     r->in[0] = in[0];
@@ -285,14 +306,14 @@ static void write_log(void)
     }
     fprintf(f, "# frame digest");
     for (k = 0; k < nh; k++) fprintf(f, " %s", region_name(k));
-    fprintf(f, " p1 p2 screen kcalls boost rand_game rand_workers\n");
+    fprintf(f, " p1 p2 screen kcalls boost rand_game rand_workers apu_chip\n");
     for (i = 0; i < s_rec_n; i++) {
         const np_frame_rec *r = rec_get(i);
         if (!r) continue;
         fprintf(f, "%u %016llX", r->frame, (unsigned long long)r->digest);
         for (k = 0; k < nh; k++) fprintf(f, " %08X", r->region[k]);
-        fprintf(f, " %04X %04X %08X %u %u %u %u\n", r->in[0].buttons, r->in[1].buttons,
-                r->screen, r->kcalls, r->boost, r->rand_game, r->rand_workers);
+        fprintf(f, " %04X %04X %08X %u %u %u %u %u\n", r->in[0].buttons, r->in[1].buttons,
+                r->screen, r->kcalls, r->boost, r->rand_game, r->rand_workers, r->apu_chip);
     }
     fclose(f);
 }
@@ -867,6 +888,7 @@ uint32_t netplay_session_frame(void) { return s_frame; }
 int netplay_skip_movies(void) { return s_state == NP_STATE_ACTIVE || s_boot; }
 void netplay_set_boot_pump(int (*pump)(void)) { s_boot_pump = pump; }
 uint32_t netplay_seed_va(void) { return s_state == NP_STATE_ACTIVE ? s_seed_va : 0; }
+
 
 /* ── UI ─────────────────────────────────────────────────────────────── */
 

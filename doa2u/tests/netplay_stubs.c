@@ -6,6 +6,8 @@
 
 int g_det_begin, g_det_end, g_det_frames, g_apu_begin, g_apu_end;
 uint32_t g_io;
+uint32_t g_kcalls;      /* what xbox_det_kcalls reports */
+uint64_t g_apu_chip;    /* what mcpx_apu_det_chip_frames reports */
 
 void     xbox_det_current_bases(xbox_det_bases *b) { b->tick_ms = 1000; b->qpc = 2000; b->filetime = 3000; }
 void     xbox_det_begin(const xbox_det_bases *b) { (void)b; g_det_begin++; g_det_frames = 0; }
@@ -14,13 +16,14 @@ void     xbox_det_frame(void) { g_det_frames++; }
 uint32_t xbox_det_tick_ms(void) { return 1000u + (uint32_t)g_det_frames * 1000u / 60u; }
 uint64_t xbox_det_filetime(void) { return 3000u + (uint64_t)g_det_frames * 166667u; }
 uint32_t xbox_det_io_count(void) { return g_io; }
-uint32_t xbox_det_kcalls(void) { return 0; }
+uint32_t xbox_det_kcalls(void) { return g_kcalls; }
 uint64_t xbox_det_boost(void) { return 0; }
 
 void     mcpx_apu_det_begin(uint64_t xgscnt_base) { (void)xgscnt_base; g_apu_begin++; }
 uint64_t mcpx_apu_xgscnt_now(void) { return 4000; }
 void     mcpx_apu_det_end(void) { g_apu_end++; }
 void     mcpx_apu_det_frame(void) {}
+uint64_t mcpx_apu_det_chip_frames(void) { return g_apu_chip; }
 
 /* online_settings.c reads Diag from here: a file that does not exist, so
  * every setting is its default (diagnostics off). */

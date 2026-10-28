@@ -485,6 +485,11 @@ uint64_t mcpx_apu_xgscnt_now(void)
     return (uint64_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 100) + s_apu_xgs_offset;
 }
 
+/* Chip frames stepped this session (lockstep frames x 25 plus the retire-wait
+ * steps): part of the netplay digest, so two machines that stepped the chip a
+ * different number of times part at that frame. */
+uint64_t mcpx_apu_det_chip_frames(void) { return s_apu_det_chip; }
+
 uint64_t mcpx_apu_det_xgscnt(void)
 {
     /* 32 samples at 48 kHz per chip frame = 6666.67 x 100 ns */

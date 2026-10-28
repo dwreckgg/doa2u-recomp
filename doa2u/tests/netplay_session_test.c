@@ -260,6 +260,69 @@ static void test_boot_session(void)
     remove(name);
 }
 
+/* Counters in the digest (review L2): the game thread's rand() calls, the guest
+ * kernel calls and the audio chip's stepped frames are part of every frame's
+ * digest, in a region named "counters", so a replay (and an online peer) that
+ * ran different guest code - or stepped the chip a different number of times -
+ * is caught at that frame even when no hashed memory differs yet. Each counter
+ * is perturbed alone, at frame 10 of a replay, with no memory change: the
+ * replay must say it diverged at frame 10 in "counters". */
+static void boot_record_20(char *name, size_t cap)
+{
+    int i;
+    fake_game_reset();
+    reset_screens();
+    g_kcalls = 0; g_apu_chip = 0;
+    netplay_set_record(1);
+    CHECK(netplay_boot_begin(0x4321u, NULL));
+    for (i = 0; i < 20; i++) { g_kcalls += 7; g_apu_chip += 25; script(netplay_session_frame()); tick(); }
+    netplay_set_armed(0, NP_ROLE_HOST);
+    g_kcalls += 7; g_apu_chip += 25;                              /* the ending tick records frame 20 too */
+    script(netplay_session_frame());
+    tick();
+    netplay_set_record(0);
+    CHECK(find_replay(name, cap));
+}
+
+static np_status boot_replay_20(const char *name, int which)
+{
+    int i;
+    fake_game_reset();
+    reset_screens();
+    g_kcalls = 0; g_apu_chip = 0;
+    CHECK(netplay_boot_begin(0, name));
+    for (i = 0; i < 40 && st().state == NP_STATE_ACTIVE; i++) {
+        uint32_t f = netplay_session_frame();
+        g_kcalls += 7; g_apu_chip += 25;
+        if (f == 10) {
+            if (which == 1) g_kcalls += 1;                       /* one more guest kernel call */
+            if (which == 2) g_apu_chip += 1;                     /* one more chip frame (a retire-wait step) */
+            if (which == 3) netplay_note_rand();                 /* one more game-thread rand() call */
+        }
+        script(f);
+        tick();
+    }
+    return st();
+}
+
+static void test_counters_in_digest(void)
+{
+    char name[128];
+    np_status s;
+    int which;
+    boot_record_20(name, sizeof name);
+    s = boot_replay_20(name, 0);                                  /* control: nothing perturbed */
+    CHECK(strncmp(s.message, "Replay matched the recording for all", 36) == 0);
+    for (which = 1; which <= 3; which++) {
+        s = boot_replay_20(name, which);
+        if (s.diverged_at != 10 || !strstr(s.message, "(counters"))
+            fprintf(stderr, "counter %d: %s\n", which, s.message);
+        CHECK(s.diverged_at == 10);
+        CHECK(strstr(s.message, "DIVERGED at frame 10 (counters") != NULL);
+    }
+    remove(name);
+}
+
 static void test_ring(void)
 {
     uint32_t h[NP_MAX_REGIONS];
@@ -271,11 +334,12 @@ static void test_ring(void)
     for (i = 0; i < 299; i++) tick();
     CHECK(netplay_session_frame() == 300);
     CHECK(netplay_session_frame_regions(299, h, NP_MAX_REGIONS) == netplay_session_region_count());
-    CHECK(netplay_session_frame_regions(44, h, NP_MAX_REGIONS) == 5);   /* 2 sync + 2 extra + seedclock */
+    CHECK(netplay_session_frame_regions(44, h, NP_MAX_REGIONS) == 6);   /* 2 sync + 2 extra + seedclock + counters */
     CHECK(netplay_session_frame_regions(43, h, NP_MAX_REGIONS) == 0);   /* older than 256 frames */
     CHECK(netplay_session_frame_regions(300, h, NP_MAX_REGIONS) == 0);  /* not yet */
     CHECK(strcmp(netplay_session_region_name(0), "fighters") == 0);
     CHECK(strcmp(netplay_session_region_name(4), "seedclock") == 0);
+    CHECK(strcmp(netplay_session_region_name(5), "counters") == 0);
     netplay_set_armed(0, NP_ROLE_HOST);
     tick();
 }
@@ -459,6 +523,7 @@ int main(void)
     test_barrier_and_mirror();
     test_record_and_replay();
     test_boot_session();
+    test_counters_in_digest();
     test_boot_online();
     test_ring();
     test_provider();
