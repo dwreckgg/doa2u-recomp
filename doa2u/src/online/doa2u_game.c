@@ -383,6 +383,12 @@ static const np_region k_sync[] = {
     { 0x007BFDDCu, 0x0004u, "tick1s" },    /* last tick of the main loop's once-a-second probe (sub_002A5530) */
     { 0x00801A18u, 0x0004u, "playtick" },  /* tick at profile load, for play time (sub_00023C10); set in-session */
     { 0x003DC9FCu, 0x0004u, "bootword" },  /* differs per boot, no absolute reference in the code */
+    /* Two shuffled index tables, dwords 0..15 then 0..19, drawn before the session's
+     * frame 0 (boot runs on host time): the RAM sweep found them differing between two
+     * copies from session frame 13 until the game drew them again near frame 2200 (the
+     * fight load), in 3 of 5 loopback sessions (2026-10-28). The words after them
+     * (0xE0CC34..0xE0CC3C, sub_001399BC) were equal. Small integers, no pointers. */
+    { 0x00E0CBA0u, 0x0090u, "shuffles" },
 };
 static const np_region k_extra[] = {
     { 0x00A94A70u, 0x0150u, "pads" },      /* per-pad aggregates the builder writes */
