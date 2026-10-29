@@ -36,7 +36,9 @@
 #include "netplay_sweep.h"
 #include "netplay_game.h"
 #include "gekkonet.h"
+#include "release_channel.h"
 #include "../kernel/perf.h"
+#include <stddef.h>
 
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)   /* mstcpip.h hides it without _WIN32_WINNT */
@@ -75,8 +77,11 @@ enum { LEAVE_LEFT = 0, LEAVE_CANCEL, LEAVE_DESYNC, LEAVE_MISMATCH, LEAVE_BADSTAR
 
 #pragma pack(push, 1)
 typedef struct { uint32_t magic; uint8_t type; uint8_t flags; uint16_t len; } pk_hdr;
-typedef struct { uint32_t proto, build; uint8_t layout[NP_LAYOUT_MAX]; uint8_t laysel; uint64_t files; } pk_hello;
-typedef struct { uint32_t proto, build; uint8_t accept; char reason[96]; } pk_welcome;
+/* `version` (the release tag, release_channel.h) was appended after the first
+ * public builds: a shorter hello or welcome reads as an empty version. */
+typedef struct { uint32_t proto, build; uint8_t layout[NP_LAYOUT_MAX]; uint8_t laysel; uint64_t files;
+                 char version[RC_VERSION_MAX]; } pk_hello;
+typedef struct { uint32_t proto, build; uint8_t accept; char reason[96]; char version[RC_VERSION_MAX]; } pk_welcome;
 typedef struct { uint32_t t; uint8_t battle; } pk_ping;      /* battle: the host's choice, 0 Single 1 Tag */
 typedef struct { uint8_t tag; } pk_ready;
 typedef struct { uint32_t id; uint8_t msg_type; uint8_t nchunks; uint8_t idx; uint8_t pad; } pk_chunk;
@@ -1101,6 +1106,8 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
         memset(&w, 0, sizeof(w));
         w.proto = PROTO_VERSION;
         w.build = netplay_build_stamp();
+        strncpy(w.version, DOA2U_RELEASE_TAG, sizeof(w.version) - 1);
+        hl.version[sizeof(hl.version) - 1] = 0;
         if (s_have_peer && !from_peer) {
             w.accept = 0;
             strcpy(w.reason, "The host already has an opponent.");
@@ -1108,12 +1115,17 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
             return;
         }
         if (hl.proto != PROTO_VERSION || hl.build != netplay_build_stamp()) {
+            char advice[200];
             w.accept = 0;
-            _snprintf(w.reason, sizeof(w.reason) - 1,
-                      "Different build (host %08X, you %08X): play with the host's exe.",   /* fits reason[96] */
-                      w.build, hl.build);
+            /* a joiner that sends its version writes its own advice from ours; this
+             * reason is for one that does not (fits reason[96]) */
+            strncpy(w.reason, "Different build: both players need the same netplay release (Check for Updates).",
+                    sizeof(w.reason) - 1);
             send_raw(from, PK_WELCOME, &w, sizeof(w));
-            set_event("Refused a player: different build (%08X, ours %08X).", hl.build, w.build);
+            fprintf(stderr, "[NETPLAY] refused build %08X (%s), ours %08X (%s)\n", hl.build,
+                    hl.version[0] ? hl.version : "no version", w.build, DOA2U_RELEASE_TAG);
+            rc_mismatch_advice(DOA2U_RELEASE_TAG, hl.version, advice, sizeof advice);
+            set_event("Refused a player with a different build. %s", advice);
             return;
         }
         if (blen < sizeof(hl)) return;
@@ -1140,12 +1152,24 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
     }
     case PK_WELCOME: {
         pk_welcome w;
-        if (blen < sizeof(w) || s_is_host || s_state != NPL_CONNECTING) return;
+        if (blen < offsetof(pk_welcome, version) || s_is_host || s_state != NPL_CONNECTING) return;
         /* the answer may come from the host's LAN address when the code
          * carried its public one (same-network case) */
         (void)is_candidate;
-        memcpy(&w, body, sizeof(w));
+        memset(&w, 0, sizeof(w));                     /* a host from before versions: no version */
+        memcpy(&w, body, blen < sizeof(w) ? blen : sizeof(w));
         w.reason[sizeof(w.reason) - 1] = 0;
+        w.version[sizeof(w.version) - 1] = 0;
+        if (!w.accept && w.build != netplay_build_stamp() && w.version[0]) {
+            char advice[200];                         /* who has the newer release, who updates */
+            rc_mismatch_advice(DOA2U_RELEASE_TAG, w.version, advice, sizeof advice);
+            fprintf(stderr, "[NETPLAY] the host runs build %08X (%s), ours %08X (%s)\n", w.build, w.version,
+                    netplay_build_stamp(), DOA2U_RELEASE_TAG);
+            set_event("%s", advice);
+            go_offline();
+            banner_for_event(12000);
+            return;
+        }
         if (!w.accept) {
             set_event("%s", w.reason[0] ? w.reason : "The host refused the connection.");
             go_offline();
@@ -1159,6 +1183,8 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
         /* the host reaching out to us: answer where the packet came from */
         if (!s_is_host && s_state == NPL_CONNECTING && (from_peer || is_candidate(from))) {
             pk_hello hl;
+            memset(&hl, 0, sizeof(hl));
+            strncpy(hl.version, DOA2U_RELEASE_TAG, sizeof(hl.version) - 1);
             hl.proto = PROTO_VERSION;
             hl.build = netplay_build_stamp();
             hl.files = netplay_files_fp();
@@ -1344,6 +1370,8 @@ static void poll_network(void)
     case NPL_CONNECTING:
         if (!s_hello_sent || now - s_hello_sent >= HELLO_MS) {
             pk_hello hl;
+            memset(&hl, 0, sizeof(hl));
+            strncpy(hl.version, DOA2U_RELEASE_TAG, sizeof(hl.version) - 1);
             hl.proto = PROTO_VERSION;
             hl.build = netplay_build_stamp();
             hl.files = netplay_files_fp();
@@ -2180,7 +2208,8 @@ void netplay_boot_joiner_received(const uint8_t *data, uint32_t len)
     if (d.build_stamp != netplay_build_stamp()) {
         boot_answer(d.token, 0);
         np_handoff_free(&d);
-        set_event("The host runs a different build of the game; both need the same one.");
+        set_event("The host runs a different build of the game: both players need the same netplay "
+                  "release (Check for Updates in the Online tab).");
         return;
     }
     fill_own_side(&d, NP_HANDOFF_ROLE_JOINER);

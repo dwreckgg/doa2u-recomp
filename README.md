@@ -32,6 +32,20 @@ disc into an `assets` folder next to `DOA2U.exe` (so that `assets/DOA2.xbe` exis
 Press the **Escape** key to open the overlay menu. This has controller mapping, video, and other settings.
 Settings are saved to `doa2u_settings.ini` and `doa2u_input.ini` next to the executable.
 
+## Online play (netplay branch)
+
+Both players need the **same build**: the online check compares the compiled code, so two exes built
+on different PCs (different compilers) will not connect. Every push to the `netplay` branch is built
+by GitHub and published as a **netplay pre-release**, so both players can use one exe:
+
+- Download the newest `DOA2U-netplay-v1.0.N-win64.zip` from the
+  [Releases page](https://github.com/parkerallan/doa2u-recomp/releases) and put its `DOA2U.exe` next to
+  your `assets` folder, **or** press **Check for Updates** in the Esc menu's **Online** tab: it fetches
+  the newest netplay release and replaces the exe (restart the game afterwards).
+- One player presses **Host** and sends the code; the other pastes it and presses **Join**. The host
+  starts the online session and both games restart into it.
+- If the two builds differ, the game says who has the older release and should update.
+
 ## Credits
 
 This project stands on the amazing work of **Ned Heller (sp00nz)**:

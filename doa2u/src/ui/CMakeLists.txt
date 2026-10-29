@@ -33,11 +33,13 @@ target_link_libraries(doa2u_ui PRIVATE
     winhttp
 )
 
-# This build's version, compared against the GitHub release tags
-# (v<major>.<minor>.<CI run number>) by Check for Updates.
-set(DOA2U_BUILD_NUMBER 0 CACHE STRING "CI run number")
+# This build's version and release channel (top-level CMakeLists.txt), compared
+# against the GitHub release tags by Check for Updates.
 target_compile_definitions(doa2u_ui PRIVATE
-    DOA2U_VERSION_STRING="${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${DOA2U_BUILD_NUMBER}")
+    DOA2U_VERSION_STRING="${DOA2U_VERSION}"
+    DOA2U_RELEASE_CHANNEL="${DOA2U_RELEASE_CHANNEL}"
+    DOA2U_RELEASE_REPO="${DOA2U_RELEASE_REPO}"
+    DOA2U_RELEASE_TAG="${DOA2U_RELEASE_TAG}")
 
 # ImGui is third-party: build it clean but do not hold it to our warning level.
 if(MSVC)

@@ -1,10 +1,23 @@
 name: Release
 
+# On the netplay branch every push is built and published as a GitHub
+# pre-release tagged netplay-v<major>.<minor>.<run>: both online players
+# download the same DOA2U.exe (the online build check compares the compiled
+# code, so two self-built exes from different compilers never match), and
+# Check for Updates in the game fetches the newest one. Pre-releases are not
+# returned by /releases/latest, so the main builds' updater does not see them.
+# A manual run on any other branch publishes a main release v<major>.<minor>.<run>.
 on:
+  push:
+    branches: [netplay]
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -23,20 +36,36 @@ jobs:
           if (-not $m.Success) {
               throw "Could not parse VERSION out of project(doa2u_recomp ...) in doa2u/CMakeLists.txt"
           }
-          $tag = "v$($m.Groups[1].Value).$env:GITHUB_RUN_NUMBER"
-          Write-Host "version: $tag"
-          "tag=$tag"                     | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $channel = if ($env:GITHUB_REF_NAME -eq 'netplay') { 'netplay' } else { '' }
+          $version = "$($m.Groups[1].Value).$env:GITHUB_RUN_NUMBER"
+          $tag = if ($channel) { "$channel-v$version" } else { "v$version" }
+          Write-Host "channel: '$channel'  tag: $tag"
+          "channel=$channel"              | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag"                      | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           "zip=DOA2U-$tag-win64.zip"      | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Configure
         shell: pwsh
         run: |
           cmake --version
-          cmake -S doa2u -B doa2u/build -A x64 -DDOA2U_BUILD_NUMBER="$env:GITHUB_RUN_NUMBER"
+          cmake -S doa2u -B doa2u/build -A x64 `
+                -DDOA2U_BUILD_NUMBER="$env:GITHUB_RUN_NUMBER" `
+                -DDOA2U_RELEASE_CHANNEL="${{ steps.version.outputs.channel }}" `
+                -DDOA2U_RELEASE_REPO="$env:GITHUB_REPOSITORY"
 
       - name: Build
         shell: pwsh
-        run: cmake --build doa2u/build --config Release --target doa2u -- /m
+        run: cmake --build doa2u/build --config Release --target doa2u release_channel_test join_code_test netplay_format_test -- /m
+
+      - name: Host tests
+        shell: pwsh
+        run: |
+          $failed = 0
+          foreach ($t in 'release_channel_test', 'join_code_test', 'netplay_format_test') {
+              & "doa2u/build/tests/Release/$t.exe"
+              if ($LASTEXITCODE -ne 0) { Write-Host "$t failed ($LASTEXITCODE)"; $failed++ }
+          }
+          if ($failed) { throw "$failed host test(s) failed" }
 
       - name: Stage and zip
         shell: pwsh
@@ -70,7 +99,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" "${{ steps.version.outputs.zip }}" `
-              --title "DOA2U ${{ steps.version.outputs.tag }}" `
-              --target "$env:GITHUB_SHA" `
-              --generate-notes
+          $tag = "${{ steps.version.outputs.tag }}"
+          if ("${{ steps.version.outputs.channel }}") {
+              $notes = "Online play build from the netplay branch (commit $env:GITHUB_SHA).`n`n" +
+                       "Both players need this same release. Put DOA2U.exe from the zip in your game folder " +
+                       "(next to assets), or press Check for Updates in the game's Online tab. " +
+                       "No game data is included."
+              gh release create $tag "${{ steps.version.outputs.zip }}" `
+                  --title "DOA2U netplay $tag" `
+                  --target "$env:GITHUB_SHA" `
+                  --prerelease `
+                  --notes $notes
+          } else {
+              gh release create $tag "${{ steps.version.outputs.zip }}" `
+                  --title "DOA2U $tag" `
+                  --target "$env:GITHUB_SHA" `
+                  --generate-notes
+          }

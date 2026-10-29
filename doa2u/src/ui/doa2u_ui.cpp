@@ -26,6 +26,7 @@ extern "C" {
 #include "../online/netplay_diag.h"
 #include "../online/online_settings.h"
 #include "../online/netplay.h"
+#include "../online/release_channel.h"
 ID3D11RenderTargetView *d3d8_GetPresentRTV(void);
 UINT                    d3d8_GetPresentWidth(void);
 UINT                    d3d8_GetPresentHeight(void);
@@ -341,26 +342,47 @@ bool VersionHigher(const char *remote, const char *local)
 
 void CheckForUpdates()
 {
-    std::string js;
-    size_t at = 0;
-    if (!HttpGet(L"https://api.github.com/repos/parkerallan/doa2u-recomp/releases/latest", &js)) {
-        UpdMsg("Could not reach GitHub");
-        return;
-    }
-    std::string tag = JsonStr(js, "tag_name", &at);
-    if (tag.empty()) { UpdMsg("No release found"); return; }
+    std::string js, tag, url;
     char msg[256];
-    if (!VersionHigher(tag.c_str(), DOA2U_VERSION_STRING)) {
-        _snprintf_s(msg, sizeof(msg), _TRUNCATE, "Already on the latest version (v%s)", DOA2U_VERSION_STRING);
-        UpdMsg(msg);
-        return;
+    const std::string repo = DOA2U_RELEASE_REPO;
+    const std::wstring api = L"https://api.github.com/repos/" + std::wstring(repo.begin(), repo.end());
+    if (DOA2U_RELEASE_CHANNEL[0]) {
+        /* A release channel (the netplay branch): its pre-releases, newest first.
+         * /releases/latest never returns a pre-release, so the main builds'
+         * updater does not see these. */
+        char t[RC_VERSION_MAX], u[1024];
+        if (!HttpGet(api + L"/releases?per_page=30", &js)) { UpdMsg("Could not reach GitHub"); return; }
+        if (!rc_pick_release(js.c_str(), DOA2U_RELEASE_CHANNEL, t, sizeof t, u, sizeof u)) {
+            _snprintf_s(msg, sizeof(msg), _TRUNCATE, "No %s release found yet", DOA2U_RELEASE_CHANNEL);
+            UpdMsg(msg);
+            return;
+        }
+        tag = t;
+        url = u;
+        if (rc_version_cmp(tag.c_str(), DOA2U_RELEASE_TAG) <= 0) {
+            _snprintf_s(msg, sizeof(msg), _TRUNCATE, "Already on the latest %s release (%s)",
+                        DOA2U_RELEASE_CHANNEL, DOA2U_RELEASE_TAG);
+            UpdMsg(msg);
+            return;
+        }
+    } else {
+        size_t at = 0;
+        if (!HttpGet(api + L"/releases/latest", &js)) {
+            UpdMsg("Could not reach GitHub");
+            return;
+        }
+        tag = JsonStr(js, "tag_name", &at);
+        if (tag.empty()) { UpdMsg("No release found"); return; }
+        if (!VersionHigher(tag.c_str(), DOA2U_VERSION_STRING)) {
+            _snprintf_s(msg, sizeof(msg), _TRUNCATE, "Already on the latest version (v%s)", DOA2U_VERSION_STRING);
+            UpdMsg(msg);
+            return;
+        }
+        at = 0;
+        while (!(url = JsonStr(js, "browser_download_url", &at)).empty())
+            if (url.size() > 4 && url.compare(url.size() - 4, 4, ".zip") == 0) break;
+        if (url.empty()) { UpdMsg("The release has no download"); return; }
     }
-
-    std::string url;
-    at = 0;
-    while (!(url = JsonStr(js, "browser_download_url", &at)).empty())
-        if (url.size() > 4 && url.compare(url.size() - 4, 4, ".zip") == 0) break;
-    if (url.empty()) { UpdMsg("The release has no download"); return; }
 
     _snprintf_s(msg, sizeof(msg), _TRUNCATE, "Downloading %s...", tag.c_str());
     UpdMsg(msg);
@@ -405,6 +427,19 @@ void CheckForUpdates()
     _snprintf_s(msg, sizeof(msg), _TRUNCATE,
                 ok ? "Updated to %s. Restart the game to use it." : "Update to %s failed", tag.c_str());
     UpdMsg(msg);
+}
+
+/* The Check for Updates button and its status (General and Online tabs). */
+void DrawUpdateButton()
+{
+    if (g_upd_busy) ImGui::BeginDisabled();
+    if (ImGui::Button("Check for Updates")) {
+        g_upd_busy = true;
+        UpdMsg("Checking for updates...");
+        std::thread([] { CheckForUpdates(); g_upd_busy = false; }).detach();
+    }
+    if (g_upd_busy) ImGui::EndDisabled();
+    if (g_upd_msg[0]) ImGui::TextWrapped("%s", g_upd_msg);
 }
 
 /* ── General section ──────────────────────────────────────────────────────*/
@@ -465,14 +500,7 @@ void DrawGeneralSection()
     if (ImGui::IsItemDeactivatedAfterEdit()) doa2u_perfmon_set_threshold(s_threshold);
     if (!perfmon) ImGui::EndDisabled();
 
-    if (g_upd_busy) ImGui::BeginDisabled();
-    if (ImGui::Button("Check for Updates")) {
-        g_upd_busy = true;
-        UpdMsg("Checking for updates...");
-        std::thread([] { CheckForUpdates(); g_upd_busy = false; }).detach();
-    }
-    if (g_upd_busy) ImGui::EndDisabled();
-    if (g_upd_msg[0]) ImGui::TextWrapped("%s", g_upd_msg);
+    DrawUpdateButton();
 
     /* Quit centred above the bottom edge, version bottom-left. */
     const float gap = 24.0f;
@@ -952,6 +980,17 @@ void DrawOnlineConnection()
         if (ImGui::Checkbox("Show ping and input delay over the game (F9)", &stats))
             online_set_show_stats(stats ? 1 : 0);
     }
+
+    /* Both players need the same build: the release both download, not exe files. */
+    ImGui::SeparatorText("Version");
+    ImGui::Text("%s", DOA2U_RELEASE_TAG);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(build %08X)", netplay_build_stamp());
+    if (rc_is_dev(DOA2U_RELEASE_TAG))
+        ImGui::TextDisabled("Self-built: only players with this same exe can join. Others use the release.");
+    else
+        ImGui::TextDisabled("Both players need the same release; Check for Updates fetches the newest.");
+    DrawUpdateButton();
     ImGui::Separator();
 }
 

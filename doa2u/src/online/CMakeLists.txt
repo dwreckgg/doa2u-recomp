@@ -59,10 +59,13 @@ add_library(doa2u_online STATIC
     netplay_files.c
     netplay_handoff.c
     netplay_sweep.c
+    release_channel.c
     netplay.c
     net_upnp.c
     doa2u_game.c
 )
+
+target_compile_definitions(doa2u_online PRIVATE DOA2U_RELEASE_TAG="${DOA2U_RELEASE_TAG}")
 
 target_include_directories(doa2u_online
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}
