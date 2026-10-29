@@ -25,6 +25,8 @@ void     mcpx_apu_det_end(void) { g_apu_end++; }
 void     mcpx_apu_det_frame(void) {}
 uint64_t mcpx_apu_det_chip_frames(void) { return g_apu_chip; }
 
+void     xbox_fiber_idle_reset(void) {}   /* kernel/xbox_fiber.c: diagnostic counters */
+
 /* online_settings.c reads Diag from here: a file that does not exist, so
  * every setting is its default (diagnostics off). */
 const char *doa2u_settings_ini_path(void) { return "C:\\nonexistent_doa2u_dir\\none.ini"; }
