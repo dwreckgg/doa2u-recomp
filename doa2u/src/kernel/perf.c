@@ -14,8 +14,31 @@ static double s_slow_ms = 20.0;   /* frames longer than this are logged */
 
 static const char *k_names[PERF_COUNT] = {
     "game logic", "GPU command translation", "draw submission", "texture conversion",
-    "streaming/decode", "audio interrupt", "compose", "present wait"
+    "streaming/decode", "audio interrupt", "compose", "present wait",
+    "pacing sleep", "waiting for the other player"
 };
+
+/* Every 600 frames the log gets the average time per part (diagnostic: the
+ * whole population, not only the slow frames). */
+static double s_win[PERF_COUNT];
+static double s_win_frame;
+static int    s_win_n;
+
+static void window_add(double frame_ms, const double ms[PERF_COUNT])
+{
+    int i;
+    for (i = 0; i < PERF_COUNT; i++) s_win[i] += ms[i];
+    s_win_frame += frame_ms;
+    if (++s_win_n < 600) return;
+    fprintf(stderr, "[perf] %d frames: frame %.2f ms avg =", s_win_n, s_win_frame / s_win_n);
+    for (i = 0; i < PERF_COUNT; i++)
+        fprintf(stderr, "%s %s %.2f", i ? "," : "", k_names[i], s_win[i] / s_win_n);
+    fprintf(stderr, " (ms a frame)%c", 10);
+    fflush(stderr);
+    memset(s_win, 0, sizeof s_win);
+    s_win_frame = 0.0;
+    s_win_n = 0;
+}
 
 static DWORD         s_tid;           /* game thread: the one that finishes frames */
 static LARGE_INTEGER s_freq;
@@ -149,6 +172,7 @@ void perf_frame(void)
     ms[PERF_GAME] = frame_ms > claimed ? frame_ms - claimed : 0.0;
     memset(s_acc, 0, sizeof(s_acc));
 
+    window_add(frame_ms, ms);
     for (i = 0; i < PERF_COUNT; i++) s_hist[s_head][i] = (float)ms[i];
     s_head = (s_head + 1) % PERF_HISTORY;
     if (s_count < PERF_HISTORY) s_count++;

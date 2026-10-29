@@ -618,6 +618,8 @@ void DrawPerfGraph(ImVec2 menu_pos, ImVec2 menu_size)
         IM_COL32( 70, 200, 220, 255),   /* audio interrupt */
         IM_COL32(160, 100, 220, 255),   /* compose */
         IM_COL32(230, 100, 180, 255),   /* present wait */
+        IM_COL32( 60,  60,  70, 255),   /* pacing sleep */
+        IM_COL32(120, 120, 120, 255),   /* waiting for the other player */
     };
     static float s_frames[PERF_HISTORY][PERF_COUNT];
     int n = perf_history(s_frames, PERF_HISTORY);

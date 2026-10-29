@@ -19,6 +19,8 @@ enum {
     PERF_AUDIO,       /* APU interrupt delivery */
     PERF_COMPOSE,     /* frame -> window, overlay */
     PERF_PRESENT,     /* DXGI Present */
+    PERF_PACING,      /* the 60 Hz pacing sleep before the frame is shown */
+    PERF_NETWAIT,     /* online: waiting for the other player's input */
     PERF_COUNT
 };
 

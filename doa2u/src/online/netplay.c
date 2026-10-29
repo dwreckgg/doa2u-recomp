@@ -36,6 +36,7 @@
 #include "netplay_sweep.h"
 #include "netplay_game.h"
 #include "gekkonet.h"
+#include "../kernel/perf.h"
 
 #ifndef SIO_UDP_CONNRESET
 #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)   /* mstcpip.h hides it without _WIN32_WINNT */
@@ -1551,8 +1552,19 @@ static uint32_t tm_ms_since(const LARGE_INTEGER *t)
 
 static void tm_report(void)
 {
+    extern uint64_t netplay_session_take_hook_ticks(void);
+    uint64_t hook_ticks;
+    hook_ticks = netplay_session_take_hook_ticks();
     if (!s_tm.frames) return;
     if (online_get_diag()) {
+        extern void xbox_fiber_idle_report(void);
+        xbox_fiber_idle_report();
+    }
+    if (online_get_diag()) {
+        static LARGE_INTEGER f;
+        if (!f.QuadPart) QueryPerformanceFrequency(&f);
+        fprintf(stderr, "[netplay] session hook without the exchange wait: %.2f ms a frame (hashing, recording, "
+                "the RAM sweep, the audio chip)%c", (double)hook_ticks * 1000.0 / (double)f.QuadPart / s_tm.frames, 10);
         fprintf(stderr, "[netplay] timing over %u frames: own frame avg %.1f ms (max %u), waited for the other "
                 "player %.0f ms total in %u frames (max %u), frames ahead %d..%d, resyncs %u (full copies %u, waited "
                 "%.0f ms, max %u, %u KB), MXCSR corrections %u so far%c",
@@ -1586,6 +1598,7 @@ static int pv_exchange(const np_pad *local, np_pad out[2])
     s_save_state = NULL;
     s_save_frame = -2;
     gekko_add_local_input(s_gk, s_gk_local, (void *)local);
+    perf_begin(PERF_NETWAIT);
     for (;;) {
         int n, i;
         GekkoGameEvent **ev;
@@ -1637,6 +1650,7 @@ static int pv_exchange(const np_pad *local, np_pad out[2])
             if (s_tm.frames >= 600) tm_report();
             s_stalling = 0;
             s_in_exchange = 0;
+            perf_end(PERF_NETWAIT);
             return 1;
         }
         now = GetTickCount();
@@ -1655,6 +1669,7 @@ static int pv_exchange(const np_pad *local, np_pad out[2])
     }
     s_stalling = 0;
     s_in_exchange = 0;
+    perf_end(PERF_NETWAIT);
     return 0;
 }
 

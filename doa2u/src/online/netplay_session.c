@@ -710,11 +710,23 @@ static void load_requested_replay(void)
     s_armed = 1;
 }
 
+/* Diagnostic: game-thread time in this hook per session frame, without the wait
+ * in the input exchange (bookkeeping: hashing, recording, the sweep, the audio
+ * chip); read and cleared by the session timing report. */
+static volatile LONG64 s_hook_ticks;
+
+uint64_t netplay_session_take_hook_ticks(void)
+{
+    return (uint64_t)InterlockedExchange64(&s_hook_ticks, 0);
+}
+
 void netplay_input_tick(void)
 {
     static const np_pad none[2];
     np_pad in[2];
     int p;
+    LARGE_INTEGER t_hook0, t_ex0, t_ex1, t_hook1;
+    t_ex0.QuadPart = t_ex1.QuadPart = 0;
 
     if (s_req_replay && s_state != NP_STATE_ACTIVE) {
         if (tables_ok()) load_requested_replay();
@@ -785,6 +797,7 @@ void netplay_input_tick(void)
     }
 
 frame:
+    QueryPerformanceCounter(&t_hook0);
     fpu_guard("at the frame start");                       /* says a change came from the game's own frame; the
                                                             * guard after the exchange below would also catch it */
     if (s_boot && s_frame == 0 && !s_boot_armed) {
@@ -842,11 +855,13 @@ frame:
     } else if (s_provider) {
         np_pad local;
         np_game_pad_read(0, &local);
+        QueryPerformanceCounter(&t_ex0);
         if (!s_provider->exchange(&local, in)) {
             record_frame(none);
             end_session("input exchange ended");
             return;
         }
+        QueryPerformanceCounter(&t_ex1);
     } else {
         np_game_pad_read(0, &in[0]);
         if (!s_mirror) np_game_pad_read(1, &in[1]);
@@ -875,6 +890,8 @@ frame:
     mcpx_apu_det_frame();
     fpu_guard("after the input exchange");                 /* its waits present the last frame (host D3D) */
     s_frame++;
+    QueryPerformanceCounter(&t_hook1);
+    InterlockedExchangeAdd64(&s_hook_ticks, (t_hook1.QuadPart - t_hook0.QuadPart) - (t_ex1.QuadPart - t_ex0.QuadPart));
 }
 
 void netplay_note_rand(void)

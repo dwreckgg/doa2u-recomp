@@ -55,6 +55,7 @@ typedef struct {
                              * on thread handles (join, suspend/resume) must target ONE
                              * thread; a shared handle deadlocked the Sofdec player. */
     int      is_coroutine;  /* direct-switched (XAPI fiber), never round-robin scheduled */
+    int      vblank_server; /* waits on the D3D vblank every loop (xbox_fiber_note_vblank_wait) */
     int      resume_to;     /* fiber to park back into when this one finishes/yields */
     /* saved recompiler register-globals */
     uint32_t r_eax, r_ecx, r_edx, r_esp, r_ebx, r_esi, r_edi, r_sehebp;
@@ -194,11 +195,54 @@ int xbox_fiber_active(void) { return g_active; }
 /* Run the workers until none is ready (at most `cap` laps). Netplay
  * sessions use this wherever the game gives its workers time, so how much
  * work they finish never depends on how much was queued. */
+/* The running worker waits on the D3D vblank (kernel bridge): mark it as a
+ * vblank server, which xbox_fiber_workers_ready does not count as pending work. */
+void xbox_fiber_note_vblank_wait(void)
+{
+    if (!g_active || g_cur <= 0 || g_cur >= g_nfib || g_fib[g_cur].is_coroutine) return;
+    if (!g_fib[g_cur].vblank_server) {
+        g_fib[g_cur].vblank_server = 1;
+        fprintf(stderr, "[FIBER] #%d (ctx1 0x%08X) waits on the vblank: a vblank server%c", g_cur, g_fib[g_cur].ctx1, 10);
+        fflush(stderr);
+    }
+}
+
+/* Diagnostic counters for the run-until-idle loop (read by the session timing report). */
+static uint32_t s_idle_calls, s_idle_caps;
+static uint64_t s_idle_laps;
+static uint32_t s_idle_ready_at_cap[MAX_FIBERS];
+
 void xbox_fiber_run_workers_idle(int cap)
 {
     extern int xbox_fiber_workers_ready(void);
+    int laps = 1, full = cap;
     xbox_fiber_yield();
-    while (--cap > 0 && xbox_fiber_workers_ready()) xbox_fiber_yield();
+    while (--cap > 0 && xbox_fiber_workers_ready()) { xbox_fiber_yield(); laps++; }
+    s_idle_calls++;
+    s_idle_laps += (uint64_t)laps;
+    if (laps >= full) {
+        int i;
+        s_idle_caps++;
+        for (i = 1; i < g_nfib; i++)
+            if (g_fib[i].state == FIB_READY) s_idle_ready_at_cap[i]++;
+    }
+}
+
+void xbox_fiber_idle_report(void)
+{
+    int i;
+    if (!s_idle_calls) return;
+    fprintf(stderr, "[netplay] worker laps until idle: %u calls, %.1f laps a call, %u at the cap; ready at the cap:",
+            s_idle_calls, (double)s_idle_laps / s_idle_calls, s_idle_caps);
+    for (i = 1; i < g_nfib; i++)
+        if (s_idle_ready_at_cap[i])
+            fprintf(stderr, " #%d(routine %08X ctx1 %08X coroutine %d) %u", i, g_fib[i].start_routine,
+                    g_fib[i].ctx1, g_fib[i].is_coroutine, s_idle_ready_at_cap[i]);
+    fprintf(stderr, "%c", 10);
+    fflush(stderr);
+    s_idle_calls = s_idle_caps = 0;
+    s_idle_laps = 0;
+    memset(s_idle_ready_at_cap, 0, sizeof s_idle_ready_at_cap);
 }
 
 /* Any worker (not the primary, not a game-task coroutine) ready to run. */
@@ -212,6 +256,16 @@ int xbox_fiber_workers_ready(void)
          * within that budget the file server's progress on a load depended
          * on how much music streaming was queued ahead of it. */
         if (g_xbox_cri_watchdog_routine && g_fib[i].ctx1 == g_xbox_cri_watchdog_routine) continue;
+        /* The same holds for a worker that waits on the vblank every loop (the
+         * CRI vsync server 0x002FC5B0 and the server 0x002FC630 in DOA2U): its
+         * vblank wait only yields, so it is always READY, and counting it ran
+         * "until idle" to its 1024-lap cap on every call. Measured 2026-10-28:
+         * 1024 laps a frame, 15-20 ms of the frame on a Ryzen 7 9800X3D and
+         * about twice that on an i5-12400, which held both players of an
+         * online match to about 28 fps; the vsync counter 0xF2AD6C ran ~1060
+         * a frame. It keeps its laps (the frame's slice laps and each yield);
+         * it just no longer counts as pending work. */
+        if (g_fib[i].vblank_server) continue;
         if (g_fib[i].state == FIB_READY) return 1;
     }
     return 0;

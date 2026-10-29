@@ -63,6 +63,7 @@ int  xbox_fiber_thread_alive(uint32_t ctx1);
 void xbox_fiber_timeslice(void);
 int  xbox_fiber_workers_ready(void);   /* a worker fiber is READY */
 void xbox_fiber_run_workers_idle(int cap);  /* yield until no worker is READY */
+void xbox_fiber_note_vblank_wait(void);     /* the running worker waits on the vblank every loop */
 extern volatile int g_fib_slice_due;   /* set every 4 ms by a host timer; consumed by xbox_fiber_timeslice */
 int  xbox_fiber_any_ready(void);
 void xbox_fiber_dump_states(void);

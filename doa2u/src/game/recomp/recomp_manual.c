@@ -656,11 +656,13 @@ void sub_0034AF80(void)
             int xs = netplay_pacing_extra_us();
             if (xs) s_next.QuadPart += s_freq.QuadPart * xs / 1000000;
         }
+        perf_begin(PERF_PACING);
         while (now.QuadPart < s_next.QuadPart) {
             LONGLONG left_ms = (s_next.QuadPart - now.QuadPart) * 1000 / s_freq.QuadPart;
             if (left_ms > 2) Sleep((DWORD)(left_ms - 1));
             QueryPerformanceCounter(&now);
         }
+        perf_end(PERF_PACING);
         s_next.QuadPart += s_freq.QuadPart / 60;
     }
     {
