@@ -17,6 +17,20 @@
 #include "np_build_id.h"   /* generated: cmake/np_build_id.cmake */
 #include "netplay_game.h"
 #include "online_settings.h"
+
+void xbox_fiber_idle_reset(void);   /* kernel/xbox_fiber.c */
+
+/* Diagnostic: game-thread time in the frame hook per session frame, without the
+ * wait in the input exchange (bookkeeping: hashing, recording, the sweep, the
+ * audio chip); read and cleared by the session timing report, and cleared with
+ * the run-until-idle counters when a session starts. */
+static volatile LONG64 s_hook_ticks;
+
+static void diag_counters_reset(void)
+{
+    InterlockedExchange64(&s_hook_ticks, 0);
+    xbox_fiber_idle_reset();
+}
 #include "kernel/xbox_det.h"
 
 void     mcpx_apu_det_begin(uint64_t xgscnt_base);   /* apu_core.c: chip stepped per frame */
@@ -533,6 +547,7 @@ static void begin_session(void)
         b.filetime = s_params.filetime;
         xbox_det_begin(&b);
     }
+    diag_counters_reset();
     mcpx_apu_det_begin(s_params.xgscnt);
     s_state = NP_STATE_ACTIVE;
     if (online_get_diag()) {
@@ -710,11 +725,6 @@ static void load_requested_replay(void)
     s_armed = 1;
 }
 
-/* Diagnostic: game-thread time in this hook per session frame, without the wait
- * in the input exchange (bookkeeping: hashing, recording, the sweep, the audio
- * chip); read and cleared by the session timing report. */
-static volatile LONG64 s_hook_ticks;
-
 uint64_t netplay_session_take_hook_ticks(void)
 {
     return (uint64_t)InterlockedExchange64(&s_hook_ticks, 0);
@@ -822,6 +832,7 @@ frame:
         b.qpc = s_params.qpc;
         b.filetime = s_params.filetime;
         xbox_det_begin(&b);
+        diag_counters_reset();
         mcpx_apu_det_begin(s_params.xgscnt);
         s_last_screen = np_game_screen_key();
         s_profile_hash = save_image_hash();

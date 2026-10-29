@@ -192,17 +192,31 @@ void xbox_fiber_init(void)
 
 int xbox_fiber_active(void) { return g_active; }
 
-/* Run the workers until none is ready (at most `cap` laps). Netplay
- * sessions use this wherever the game gives its workers time, so how much
- * work they finish never depends on how much was queued. */
-/* The running worker waits on the D3D vblank (kernel bridge): mark it as a
- * vblank server, which xbox_fiber_workers_ready does not count as pending work. */
+/* DOA2U's workers that wait on the D3D vblank every loop: the CRI vsync
+ * server (counts 0xF2AD6C, runs three stream servers) and a second server.
+ * Known by routine, so the flag is set when the worker is created, the same
+ * on every machine whatever the host timing of its first wait. */
+static const uint32_t k_vblank_server_ctx1[] = { 0x002FC5B0u, 0x002FC630u };
+
+static int is_vblank_server_routine(uint32_t ctx1)
+{
+    size_t i;
+    for (i = 0; i < sizeof k_vblank_server_ctx1 / sizeof k_vblank_server_ctx1[0]; i++)
+        if (k_vblank_server_ctx1[i] == ctx1) return 1;
+    return 0;
+}
+
+/* The running worker waits on the D3D vblank (kernel bridge). A worker that
+ * is not a known vblank server is logged once: it would be counted as pending
+ * work by "until idle" and could run it to its cap again. */
 void xbox_fiber_note_vblank_wait(void)
 {
+    static int s_warned[MAX_FIBERS];
     if (!g_active || g_cur <= 0 || g_cur >= g_nfib || g_fib[g_cur].is_coroutine) return;
-    if (!g_fib[g_cur].vblank_server) {
-        g_fib[g_cur].vblank_server = 1;
-        fprintf(stderr, "[FIBER] #%d (ctx1 0x%08X) waits on the vblank: a vblank server%c", g_cur, g_fib[g_cur].ctx1, 10);
+    if (!g_fib[g_cur].vblank_server && !s_warned[g_cur]) {
+        s_warned[g_cur] = 1;
+        fprintf(stderr, "[FIBER] #%d (ctx1 0x%08X) waits on the vblank but is not a known vblank server%c",
+                g_cur, g_fib[g_cur].ctx1, 10);
         fflush(stderr);
     }
 }
@@ -212,6 +226,16 @@ static uint32_t s_idle_calls, s_idle_caps;
 static uint64_t s_idle_laps;
 static uint32_t s_idle_ready_at_cap[MAX_FIBERS];
 
+void xbox_fiber_idle_reset(void)
+{
+    s_idle_calls = s_idle_caps = 0;
+    s_idle_laps = 0;
+    memset(s_idle_ready_at_cap, 0, sizeof s_idle_ready_at_cap);
+}
+
+/* Run the workers until none is ready (at most `cap` laps). Netplay
+ * sessions use this wherever the game gives its workers time, so how much
+ * work they finish never depends on how much was queued. */
 void xbox_fiber_run_workers_idle(int cap)
 {
     extern int xbox_fiber_workers_ready(void);
@@ -223,8 +247,8 @@ void xbox_fiber_run_workers_idle(int cap)
     if (laps >= full) {
         int i;
         s_idle_caps++;
-        for (i = 1; i < g_nfib; i++)
-            if (g_fib[i].state == FIB_READY) s_idle_ready_at_cap[i]++;
+        for (i = 1; i < g_nfib; i++)                  /* the vblank servers are always READY */
+            if (g_fib[i].state == FIB_READY && !g_fib[i].vblank_server) s_idle_ready_at_cap[i]++;
     }
 }
 
@@ -240,9 +264,7 @@ void xbox_fiber_idle_report(void)
                     g_fib[i].ctx1, g_fib[i].is_coroutine, s_idle_ready_at_cap[i]);
     fprintf(stderr, "%c", 10);
     fflush(stderr);
-    s_idle_calls = s_idle_caps = 0;
-    s_idle_laps = 0;
-    memset(s_idle_ready_at_cap, 0, sizeof s_idle_ready_at_cap);
+    xbox_fiber_idle_reset();
 }
 
 /* Any worker (not the primary, not a game-task coroutine) ready to run. */
@@ -257,14 +279,19 @@ int xbox_fiber_workers_ready(void)
          * on how much music streaming was queued ahead of it. */
         if (g_xbox_cri_watchdog_routine && g_fib[i].ctx1 == g_xbox_cri_watchdog_routine) continue;
         /* The same holds for a worker that waits on the vblank every loop (the
-         * CRI vsync server 0x002FC5B0 and the server 0x002FC630 in DOA2U): its
-         * vblank wait only yields, so it is always READY, and counting it ran
+         * CRI vsync server 0x002FC5B0 and the server 0x002FC630 in DOA2U,
+         * flagged at spawn): its vblank wait only yields, so it is always
+         * READY, and counting it ran
          * "until idle" to its 1024-lap cap on every call. Measured 2026-10-28:
          * 1024 laps a frame, 15-20 ms of the frame on a Ryzen 7 9800X3D and
          * about twice that on an i5-12400, which held both players of an
          * online match to about 28 fps; the vsync counter 0xF2AD6C ran ~1060
          * a frame. It keeps its laps (the frame's slice laps and each yield);
          * it just no longer counts as pending work. */
+        /* Its laps per call are now "1 + the laps while another worker is
+         * READY" instead of a constant 1024, a function of the other
+         * workers' queues: deterministic while both machines start the
+         * session from the same state (online sessions start from boot). */
         if (g_fib[i].vblank_server) continue;
         if (g_fib[i].state == FIB_READY) return 1;
     }
@@ -286,6 +313,7 @@ int xbox_fiber_spawn(uint32_t start_routine, uint32_t ctx1, uint32_t ctx2,
     uint32_t base = xbox_HeapAllocHigh(WORKER_STACK_SIZE, 16); /* DOA2U: CPU-only, keep the GPU-addressable low heap for the game */
     f->start_routine = start_routine;
     f->ctx1 = ctx1; f->ctx2 = ctx2;
+    f->vblank_server = is_vblank_server_routine(ctx1);
     f->stack_top = base + WORKER_STACK_SIZE - 16;
     f->xhandle = xhandle;
     /* NOTE: CreateSuspended is intentionally IGNORED (fiber starts READY).

@@ -204,6 +204,9 @@ void perf_set_enabled(int on)
         s_head = s_count = 0;
         s_seen = 0;
         memset(s_acc, 0, sizeof(s_acc));
+        memset(s_win, 0, sizeof(s_win));
+        s_win_frame = 0.0;
+        s_win_n = 0;
         log_open();
         s_flush_t = now_ticks();
         g_perf_on = 1;

@@ -920,7 +920,7 @@ static void bridge_KeWaitForSingleObject(void)
                 fflush(stderr);
             }
         }
-        xbox_fiber_note_vblank_wait();     /* a worker: not pending work for "until idle" */
+        xbox_fiber_note_vblank_wait();     /* warns once for a worker not known as a vblank server */
         if (g_xbox_det_active && g_xbox_vsync_server_routine &&
             xbox_fiber_current_ctx1() == g_xbox_vsync_server_routine)
             xbox_fiber_block(XBOX_DET_VBLANK_KEY);
