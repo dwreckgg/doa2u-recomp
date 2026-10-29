@@ -30,7 +30,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5   # Node 24 (v4 runs on the deprecated Node 20)
         with:
           persist-credentials: false   # the build steps never see the write token
 
