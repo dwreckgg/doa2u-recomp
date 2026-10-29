@@ -10,6 +10,9 @@ name: Release
 on:
   push:
     branches: [netplay]
+    # what the online build id covers (the doa2u/ tree and the compiled code):
+    # a docs-only push publishes nothing
+    paths: ['doa2u/**', '.github/workflows/release.yml']
   workflow_dispatch:
 
 permissions:
@@ -21,11 +24,15 @@ concurrency:
 
 jobs:
   release:
+    # forks do not publish unless they opt in (repository variable PUBLISH_RELEASES = true)
+    if: github.repository == 'parkerallan/doa2u-recomp' || vars.PUBLISH_RELEASES == 'true'
     runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # the build steps never see the write token
 
       - name: Derive version
         id: version

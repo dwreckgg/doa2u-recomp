@@ -116,10 +116,10 @@ static int copy_str(const char *v, char *out, size_t n)
 int rc_pick_release(const char *json, const char *channel,
                     char *tag, size_t tag_n, char *zip_url, size_t url_n)
 {
-    char prefix[40], t[RC_VERSION_MAX], u[1024];
+    char prefix[40], t[RC_VERSION_MAX], u[1024], best_t[RC_VERSION_MAX], best_u[1024];
     const char *p;
     size_t plen;
-    int v[3];
+    int v[3], found = 0;
     if (!json || !channel || !*channel || !tag || !zip_url) return 0;
     if (_snprintf(prefix, sizeof prefix, "%s-v", channel) < 0) return 0;
     prefix[sizeof prefix - 1] = 0;
@@ -146,17 +146,23 @@ int rc_pick_release(const char *json, const char *channel,
                 if (!a_end) return 0;
                 uv = member(a, a_end, "browser_download_url");
                 if (copy_str(uv, u, sizeof u) && (ul = strlen(u)) > 4 && !_stricmp(u + ul - 4, ".zip")) {
-                    if (strlen(t) + 1 > tag_n || ul + 1 > url_n) return 0;   /* never half a tag */
-                    strcpy(tag, t);
-                    strcpy(zip_url, u);
-                    return 1;
+                    /* GitHub documents no order for this list: keep the highest version */
+                    if (!found || rc_version_cmp(t, best_t) > 0) {
+                        strcpy(best_t, t);
+                        strcpy(best_u, u);
+                        found = 1;
+                    }
+                    break;
                 }
                 a = a_end;
             }
         }
         p = rel_end;
     }
-    return 0;
+    if (!found || strlen(best_t) + 1 > tag_n || strlen(best_u) + 1 > url_n) return 0;   /* never half a tag */
+    strcpy(tag, best_t);
+    strcpy(zip_url, best_u);
+    return 1;
 }
 
 static const char *bare(const char *version)       /* "netplay-v1.0.14" -> "v1.0.14" */
@@ -171,9 +177,9 @@ void rc_mismatch_advice(const char *mine, const char *theirs, char *out, size_t 
     if (!out || !n) return;
     if (!mine) mine = "";
     if (!theirs) theirs = "";
-    if (!rc_parse_version(theirs, tv))
-        _snprintf(out, n, "The other player has an older game without version checks: "
-                          "they need the latest netplay release (Check for Updates).");
+    if (!rc_parse_version(theirs, tv))     /* its own updater cannot fetch netplay releases */
+        _snprintf(out, n, "The other player has an older game: they need the newest netplay release "
+                          "from the GitHub Releases page.");
     else if (rc_is_dev(mine))
         _snprintf(out, n, "You run a self-built exe: both of you should use the latest netplay "
                           "release (press Check for Updates).");
@@ -187,7 +193,7 @@ void rc_mismatch_advice(const char *mine, const char *theirs, char *out, size_t 
         _snprintf(out, n, "The other player has an older release (%s, you %s): they need to press "
                           "Check for Updates.", bare(theirs), bare(mine));
     else
-        _snprintf(out, n, "Both games say the same version (%s) but the builds differ: both press "
-                          "Check for Updates to download the release again.", bare(mine));
+        _snprintf(out, n, "Both games say the same version (%s) but the builds differ: both download "
+                          "it again from the GitHub Releases page.", bare(mine));
     out[n - 1] = 0;
 }

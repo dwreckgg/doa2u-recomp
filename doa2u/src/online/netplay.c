@@ -1118,8 +1118,9 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
             char advice[200];
             w.accept = 0;
             /* a joiner that sends its version writes its own advice from ours; this
-             * reason is for one that does not (fits reason[96]) */
-            strncpy(w.reason, "Different build: both players need the same netplay release (Check for Updates).",
+             * reason is for one that does not, whose own updater cannot fetch netplay
+             * releases: point it to the page (fits reason[96]) */
+            strncpy(w.reason, "Different build: download the newest netplay release from the GitHub Releases page.",
                     sizeof(w.reason) - 1);
             send_raw(from, PK_WELCOME, &w, sizeof(w));
             fprintf(stderr, "[NETPLAY] refused build %08X (%s), ours %08X (%s)\n", hl.build,
@@ -1160,11 +1161,14 @@ static void handle_control(const struct sockaddr_in *from, const pk_hdr *h, cons
         memcpy(&w, body, blen < sizeof(w) ? blen : sizeof(w));
         w.reason[sizeof(w.reason) - 1] = 0;
         w.version[sizeof(w.version) - 1] = 0;
-        if (!w.accept && w.build != netplay_build_stamp() && w.version[0]) {
+        if (!w.accept && !strncmp(w.reason, "Different build", 15)) {
+            /* a build refusal from a host of any version (an older one sends no version,
+             * and a reason that points the wrong way): our own advice instead. Other
+             * refusals (a full lobby, different game files) keep the host's reason. */
             char advice[200];                         /* who has the newer release, who updates */
             rc_mismatch_advice(DOA2U_RELEASE_TAG, w.version, advice, sizeof advice);
-            fprintf(stderr, "[NETPLAY] the host runs build %08X (%s), ours %08X (%s)\n", w.build, w.version,
-                    netplay_build_stamp(), DOA2U_RELEASE_TAG);
+            fprintf(stderr, "[NETPLAY] the host runs build %08X (%s), ours %08X (%s)\n", w.build,
+                    w.version[0] ? w.version : "no version", netplay_build_stamp(), DOA2U_RELEASE_TAG);
             set_event("%s", advice);
             go_offline();
             banner_for_event(12000);

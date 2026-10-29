@@ -51,6 +51,16 @@ static const char *k_list =
 "  \"body\":\"\"}\n"
 "]\n";
 
+/* GitHub documents no order for the release list: an older netplay release listed
+ * before a newer one (a branch reset to an older commit, say) must not win. */
+static const char *k_unordered =
+"[{\"tag_name\":\"netplay-v1.0.1\",\"draft\":false,\"assets\":[{\"browser_download_url\":"
+"\"https://github.com/o/r/releases/download/netplay-v1.0.1/DOA2U-netplay-v1.0.1-win64.zip\"}]},"
+" {\"tag_name\":\"netplay-v1.0.9\",\"draft\":false,\"assets\":[{\"browser_download_url\":"
+"\"https://github.com/o/r/releases/download/netplay-v1.0.9/DOA2U-netplay-v1.0.9-win64.zip\"}]},"
+" {\"tag_name\":\"netplay-v1.0.4\",\"draft\":false,\"assets\":[{\"browser_download_url\":"
+"\"https://github.com/o/r/releases/download/netplay-v1.0.4/DOA2U-netplay-v1.0.4-win64.zip\"}]}]";
+
 int main(void)
 {
     int v[3];
@@ -82,6 +92,10 @@ int main(void)
     CHECK(rc_pick_release(k_list, "netplay", tag, sizeof tag, url, sizeof url) == 1);
     CHECK(strcmp(tag, "netplay-v1.0.18") == 0);
     CHECK(strcmp(url, "https://github.com/o/r/releases/download/netplay-v1.0.18/DOA2U-netplay-v1.0.18-win64.zip") == 0);
+    /* the highest version wins, whatever the list order */
+    CHECK(rc_pick_release(k_unordered, "netplay", tag, sizeof tag, url, sizeof url) == 1);
+    CHECK(strcmp(tag, "netplay-v1.0.9") == 0);
+    CHECK(strcmp(url, "https://github.com/o/r/releases/download/netplay-v1.0.9/DOA2U-netplay-v1.0.9-win64.zip") == 0);
     CHECK(rc_pick_release("[]", "netplay", tag, sizeof tag, url, sizeof url) == 0);
     CHECK(rc_pick_release(NULL, "netplay", tag, sizeof tag, url, sizeof url) == 0);
     CHECK(rc_pick_release("{\"message\":\"API rate limit exceeded\"}", "netplay", tag, sizeof tag, url, sizeof url) == 0);
@@ -98,10 +112,14 @@ int main(void)
     CHECK(strstr(adv, "You run a self-built exe") != NULL);
     rc_mismatch_advice("netplay-v1.0.14", "netplay-v1.0.0", adv, sizeof adv);
     CHECK(strstr(adv, "The other player runs a self-built exe") != NULL);
+    /* a build from before versions has an updater that cannot fetch netplay releases:
+     * send it to the Releases page, never to its own Check for Updates */
     rc_mismatch_advice("netplay-v1.0.14", "", adv, sizeof adv);
-    CHECK(strstr(adv, "older game") != NULL);
+    CHECK(strstr(adv, "older game") != NULL && strstr(adv, "Releases page") != NULL &&
+          strstr(adv, "Check for Updates") == NULL);
+    /* same version, different build: the updater refuses an equal tag, so the page again */
     rc_mismatch_advice("netplay-v1.0.14", "netplay-v1.0.14", adv, sizeof adv);
-    CHECK(strstr(adv, "same version") != NULL);
+    CHECK(strstr(adv, "same version") != NULL && strstr(adv, "Releases page") != NULL);
     rc_mismatch_advice("netplay-v1.0.12", "netplay-v1.0.14", small, sizeof small);
     CHECK(strlen(small) < sizeof small);                        /* never overruns */
 

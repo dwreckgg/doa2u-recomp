@@ -432,13 +432,24 @@ void CheckForUpdates()
 /* The Check for Updates button and its status (General and Online tabs). */
 void DrawUpdateButton()
 {
-    if (g_upd_busy) ImGui::BeginDisabled();
+    /* Not while online: the update renames this exe and puts the new one at its
+     * path, and the restart into an online session relaunches that path - the
+     * new build, which the session hand-off then refuses. */
+    npl_status nl;
+    netplay_get(&nl);
+    bool online = nl.state != NPL_OFFLINE;
+    bool off = g_upd_busy || online;
+    if (off) ImGui::BeginDisabled();
     if (ImGui::Button("Check for Updates")) {
         g_upd_busy = true;
         UpdMsg("Checking for updates...");
         std::thread([] { CheckForUpdates(); g_upd_busy = false; }).detach();
     }
-    if (g_upd_busy) ImGui::EndDisabled();
+    if (off) ImGui::EndDisabled();
+    if (online) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("Disconnect from online play first.");
+    }
     if (g_upd_msg[0]) ImGui::TextWrapped("%s", g_upd_msg);
 }
 
@@ -987,7 +998,7 @@ void DrawOnlineConnection()
     ImGui::SameLine();
     ImGui::TextDisabled("(build %08X)", netplay_build_stamp());
     if (rc_is_dev(DOA2U_RELEASE_TAG))
-        ImGui::TextDisabled("Self-built: only players with this same exe can join. Others use the release.");
+        ImGui::TextDisabled("Self-built: only the same build (same code and compiler) can join. Others use the release.");
     else
         ImGui::TextDisabled("Both players need the same release; Check for Updates fetches the newest.");
     DrawUpdateButton();
