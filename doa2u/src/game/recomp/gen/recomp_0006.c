@@ -38064,7 +38064,7 @@ loc_001215B0: ;
  * CC: cdecl, 0 params, returns int_or_void
  * Frame: fpo_leaf
  */
-void sub_001215B2(void)
+void sub_001215B2_gen(void)
 {
     uint32_t ebp;
     int _flags = 0; /* fallback flag var */

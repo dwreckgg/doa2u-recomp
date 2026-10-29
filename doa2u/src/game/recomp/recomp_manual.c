@@ -395,6 +395,53 @@ void sub_000F9A10(void)
     sub_000F9A10_gen();
 }
 
+/* Rematch picks (0x00121580, called by the results screen's AGAIN, sub_000DA1A0, and
+ * by sub_000DA408): a player whose bit is set in the human-player mask at 0x87CFB0
+ * (bit 0 player 1, bit 1 player 2) keeps the characters and costumes picked at the
+ * character select; any other player's picks are reset to 0xFF, and sub_00137530
+ * then draws a random fighter for every 0xFF slot. In DOA2.xbe:
+ *   1215A3  test esi,esi            ; esi = player 0 / 1
+ *   1215A5  mov  al,[0x87CFB0]
+ *   1215AA  jnz  1215B0
+ *   1215AC  test al,1
+ *   1215AE  jmp  1215B2
+ *   1215B0  test al,2
+ *   1215B2  jnz  1215F5             ; bit set: keep the picks
+ *   1215B4  cmp  dword [0xDF57B4],9 / je 1215F5, else reset to 0xFF
+ *   1215F5  push [0x87AE30 + 0x94*esi], push esi, call 0x137530 ...
+ * 1215B2 is a jump target, so it was generated as a fragment of its own, and the
+ * flags of the TEST before it did not reach its JNZ (the fragment's fallback flag is
+ * 0): the branch was never taken, both players were reset every time, and AGAIN
+ * fought two random characters, online and offline alike. The TEST is redone here
+ * from the same inputs: al still holds [0x87CFB0] (loaded at 1215A5 on both paths),
+ * and the bit is 2 exactly when esi is non-zero (the JNZ at 1215AA). */
+void sub_001215B2_gen(void);
+void sub_001215B2(void)
+{
+    uint32_t ebp = g_seh_ebp;
+    static int s_checked;
+    if (!s_checked && (LO8(eax) != MEM8(0x0087CFB0u) || esi > 1)) {
+        s_checked = 1;                                  /* the two inputs the test is rebuilt from */
+        fprintf(stderr, "[AGAIN] sub_001215B2 entered with al %02X, [87CFB0] %02X, esi %u\n",
+                LO8(eax), MEM8(0x0087CFB0u), esi);
+    }
+    if (!(LO8(eax) & (esi ? 2u : 1u))) {               /* JNZ not taken: the generated body */
+        sub_001215B2_gen();
+        return;
+    }
+    /* 1215F5: sub_00137530(player, [0x87AE30 + 0x94 * player]) with the picks kept */
+    edx = esi * 0x94u;
+    eax = ZX8(MEM8(edx + 0x87AE30u));
+    PUSH32(esp, eax);
+    PUSH32(esp, esi);
+    g_seh_ebp = ebp; PUSH32(esp, 0x12160Bu); sub_00137530();
+    esp = esp + 8;
+    esi++;
+    if (CMP_L(esi, 2)) { g_seh_ebp = ebp; sub_001215A3(); return; }
+    POP32(esp, esi);
+    g_seh_ebp = ebp; sub_00137450();                   /* tail jmp 0x00137450 */
+}
+
 /* Modelled vblank: the game may wait on vblank during movies without calling Swap,
  * so the presenter is ticked here too. */
 void game_pump_vblank_servers(void)
