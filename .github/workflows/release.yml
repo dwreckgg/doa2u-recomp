@@ -60,9 +60,13 @@ jobs:
                 -DDOA2U_RELEASE_CHANNEL="${{ steps.version.outputs.channel }}" `
                 -DDOA2U_RELEASE_REPO="$env:GITHUB_REPOSITORY"
 
+      # One project at a time: the generated recomp sources (26 files, ~55 MB of C)
+      # need several GB per compiler process at /O2, and with projects building side
+      # by side a run failed with C1002 "compiler is out of heap space in pass 2"
+      # (2026-10-29) on the 16 GB runner.
       - name: Build
         shell: pwsh
-        run: cmake --build doa2u/build --config Release --target doa2u release_channel_test join_code_test netplay_format_test -- /m
+        run: cmake --build doa2u/build --config Release --target doa2u release_channel_test join_code_test netplay_format_test -- /m:1
 
       - name: Host tests
         shell: pwsh
